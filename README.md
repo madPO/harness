@@ -14,6 +14,7 @@ The current collection contains [Oh My Pi](https://github.com/can1357/oh-my-pi) 
 | `omp/agent/RULES.md` | Always-loaded routing policy for the five bundled skills. |
 | `omp/agent/lsp.json` | Oh My Pi language server configuration. |
 | `omp/agent/mcp.json` | Oh My Pi MCP server configuration. |
+| `omp/agent/PERSONALITY.md` | Camina Drummer-inspired personality instructions for OMP’s native personalization mechanism. |
 | `nono/profiles/omp.json` | Oh My Pi sandbox profile with Go, JavaScript, .NET, and browser tooling access. |
 | `package.json` | Private npm package metadata and Oh My Pi extension entry points. |
 
@@ -57,6 +58,24 @@ These commands deliberately do not overwrite existing files. If you already have
 For a named profile, set `agent_dir` to that profile's agent directory (normally `~/.omp/profiles/<name>/agent`); use your configured agent directory for an XDG layout. Repeat the installation for each profile that needs the policy. Keep rule and skill discovery enabled: do not start these sessions with `--no-rules` or `--no-skills`.
 
 Start a new Oh My Pi session from any project after installation. The policy applies globally for that agent directory, without a manual prompt or `/skill:` invocation. Symlinks pick up repository changes on new sessions; if you prefer copies, copy `omp/agent/RULES.md` to your agent directory as `RULES.md`, copy the complete directories from `omp/skills/` (including references) into its `skills/` directory, and update them when the collection changes.
+
+### Personality
+
+[`omp/agent/PERSONALITY.md`](omp/agent/PERSONALITY.md) contains concise behavioral instructions inspired by Camina Drummer: directness, practical leadership, earned trust, and steady judgment. It replaces OMP’s personality text without replacing its built-in tool and workflow instructions.
+
+Install it in the active agent directory, not a project-level `.omp` directory:
+
+```sh
+agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
+mkdir -p "$agent_dir"
+ln -s "$PWD/omp/agent/PERSONALITY.md" "$agent_dir/PERSONALITY.md"
+```
+
+The link command deliberately does not overwrite an existing file. If you already have a `PERSONALITY.md`, review and merge or replace its contents yourself. For a named profile, set `agent_dir` to that profile’s agent directory (normally `~/.omp/profiles/<name>/agent`); use your configured agent directory for an XDG layout.
+
+Keep the `personality` setting at `default`, `friendly`, or `pragmatic`: the custom file replaces whichever preset is selected. `none` disables the personality block, including this file. Start a new OMP session after installation or edits. Task subagents always use `none` and do not inherit the personality.
+
+Passing `--config ./omp/agent/config.yml` alone does not install or load this file. For a one-session trial without installation, run `omp --append-system-prompt ./omp/agent/PERSONALITY.md`; this appends the instructions instead of replacing the selected personality.
 
 ### Extensions and package discovery
 
