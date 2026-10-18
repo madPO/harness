@@ -1,0 +1,23 @@
+{
+  "servers": {
+    "gopls": {
+      "id": "gopls",
+      "command": "gopls",
+      "args": ["serve"],
+      "extensions": [".go"],
+      "languageId": "go"
+    },
+    "typescript-language-server": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"],
+      "rootMarkers": ["tsconfig.json", "jsconfig.json", "package.json", ".git"]
+    },
+    "roslyn": {
+      "command": "roslyn-language-server",
+      "args": ["--stdio", "--autoLoadProjects"],
+      "fileTypes": [".cs"],
+      "rootMarkers": [".git", "global.json", "*.sln", "*.slnx"]
+    }
+  }
+}

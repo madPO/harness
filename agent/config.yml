@@ -1,0 +1,76 @@
+modelRoles:
+  default: openai-codex/gpt-5.6-terra:medium
+  smol: openai-codex/gpt-6-luna:high
+  slow: openai-codex/gpt-6.1-sol:medium
+  plan: openai/gpt-6-sol:medium
+  vision: openai/gpt-6-sol:medium
+  designer: openai/gpt-6-sol:medium
+  commit: openai/gpt-6-luna:low
+  task: openai/gpt-6-luna:high
+  tiny: openai/gpt-6-luna:low
+  advisor: openai-codex/gpt-6-sol:medium
+
+advisor:
+  enabled: false
+
+providers:
+  autoThinkingMaxEffort: xhigh
+
+retry:
+  enabled: true
+  modelFallback: true
+  fallbackRevertPolicy: cooldown-expiry
+  fallbackChains:
+    default:
+      - openai/gpt-6-luna:high
+      - openai/gpt-5.6-luna:high
+      - openai/gpt-5.6-terra:medium
+    smol:
+      - openai/gpt-6-luna:high
+      - openai/gpt-5.6-luna:high
+      - openai/gpt-5.6-terra:medium
+    slow:
+      - openai/gpt-6-sol:medium
+      - openai/gpt-5.6-sol:medium
+      - openai/gpt-5.6-terra:xhigh
+    plan:
+      - openai/gpt-6-sol:medium
+      - openai/gpt-5.6-sol:medium
+      - openai/gpt-5.6-terra:high
+    advisor:
+      - openai/gpt-6-sol:medium
+      - openai/gpt-5.6-sol:medium
+      - openai/gpt-5.6-terra:high
+
+statusLine:
+  preset: custom
+  compactThinkingLevel: false
+  leftSegments:
+    - model
+  rightSegments:
+    - context
+    - subagents
+    - usage
+
+theme:
+  dark: dark-arctic
+symbolPreset: unicode
+defaultThinkingLevel: auto
+textVerbosity: medium
+lsp:
+  enabled: true
+  lazy: false
+  diagnosticsOnWrite: true
+  diagnosticsOnEdit: false
+dev:
+  autoqaConsent: granted
+codexResets:
+  autoRedeem: "no"
+prewalk:
+  enabled: false
+browser:
+  headless: true
+  enabled: false
+
+memory:
+  backend: local

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "penpot": {
+      "type": "http",
+      "url": "https://design.penpot.app/mcp/stream?userToken=${PENPOT_TOKEN}"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--headless", "--no-sandbox"]
+    }
+  }
+}
