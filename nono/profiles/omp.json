@@ -1,0 +1,123 @@
+{
+  "extends": [
+    "nolabs-ai/pi"
+  ],
+  "meta": {
+    "name": "omp",
+    "version": "1.0.0",
+    "description": "Oh My Pi development profile for Go, JavaScript, .NET, and browser tooling"
+  },
+  "commands": {
+    "allow": [
+      "gopls"
+    ]
+  },
+  "security": {
+    "capability_elevation": false,
+    "wsl2_proxy_policy": "error"
+  },
+  "linux": {
+    "sandbox_policy": "auto"
+  },
+  "filesystem": {
+    "allow": [
+      "$WORKDIR",
+      "$HOME/.omp",
+      "$XDG_CACHE_HOME",
+
+      "$HOME/.bun",
+      "$HOME/.npm",
+
+      "$HOME/go",
+      "/usr/local/go",
+
+      "$HOME/.dotnet",
+      "$HOME/.nuget",
+      "$HOME/.templateengine",
+      "$XDG_DATA_HOME/NuGet",
+      "/usr/local/share/dotnet",
+      "/usr/share/dotnet",
+
+      "/opt/google",
+
+      "/lib",
+      "/lib64",
+      "/usr/bin",
+      "/usr/lib",
+      "/usr/lib64",
+      "/usr/local/bin",
+
+      "/dev/shm",
+      "/tmp",
+      "/var/tmp",
+
+      "/base"
+    ],
+    "read": [
+      "/etc",
+      "$XDG_CONFIG_HOME/git",
+      "$XDG_DATA_HOME/fnm",
+      "$XDG_DATA_HOME/pnpm",
+      "$HOME/.local/lib/node_modules"
+    ],
+    "allow_file": [
+      "$XDG_CONFIG_HOME/go/env",
+      "/bin/google-chrome-stable",
+      "/bin/sh",
+      "/etc/gitconfig",
+      "/etc/magic",
+      "/ralplan"
+    ]
+  },
+  "network": {
+    "block": false,
+    "allow_http2": false,
+    "network_profile": "developer",
+    "allow_domain": [
+      "api.openai.com",
+      "auth.openai.com",
+      "auth0.openai.com",
+      "chatgpt.com",
+      "oaistatic.com",
+      "oaiusercontent.com",
+
+      "go.yaml.in",
+      "golang.org",
+      "*.golang.org",
+      "gopkg.in",
+
+      "*.npmjs.org",
+      "bun.sh",
+
+      "*.nuget.org",
+      "nuget.org",
+      "pkgs.dev.azure.com",
+
+      "*.googleapis.com",
+      "cdn.playwright.dev",
+      "playwright.download.prss.microsoft.com",
+
+      "design.penpot.app",
+
+      "127.0.0.1"
+    ],
+    "open_port": [
+      3000,
+      5000,
+      5001,
+      5173
+    ],
+    "no_proxy": [
+      "localhost",
+      "192.168.1.11",
+      "192.168.0.1"
+    ],
+    "upstream_proxy": "",
+    "upstream_bypass": [
+      "localhost",
+      "127.0.0.1",
+      "192.168.1.11",
+      "192.168.0.1"
+    ]
+  }
+}
