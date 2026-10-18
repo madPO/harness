@@ -8,7 +8,7 @@ The current collection contains [Oh My Pi](https://github.com/can1357/oh-my-pi) 
 
 | Path | Contents |
 | --- | --- |
-| `omp/extensions/` | Oh My Pi TypeScript or JavaScript extensions: tools, commands, and event handlers. Currently contains only `.gitkeep`. |
+| `omp/extensions/` | Oh My Pi extensions, including the independent English reviewer. |
 | `omp/skills/` | Skill directories, each containing a `SKILL.md` and any supporting references. |
 | `omp/agent/config.yml` | Personal Oh My Pi configuration: model roles, fallback chains, UI, and tool settings. |
 | `omp/agent/RULES.md` | Always-loaded routing policy for the five bundled skills. |
@@ -22,7 +22,7 @@ The current collection contains [Oh My Pi](https://github.com/can1357/oh-my-pi) 
 
 ## Oh My Pi
 
-Requires an installed `omp` CLI. There are no dependencies or build steps yet. Run the following commands from this repository's root.
+Requires Oh My Pi 18.11.2 or newer. Extensions run directly as TypeScript; no build is needed. Bun is required for development checks. Run the following commands from this repository's root.
 
 ### Configuration
 
@@ -79,17 +79,64 @@ Passing `--config ./omp/agent/config.yml` alone does not install or load this fi
 
 ### Extensions and package discovery
 
-There are no extension modules yet. Once an extension exists, try it directly:
+The English reviewer is registered in the root `package.json` under `omp.extensions`. Try it without loading other extensions:
 
 ```sh
-omp --no-extensions --extension ./omp/extensions/my-extension.ts
+omp --no-extensions --extension ./omp/extensions/english-reviewer/index.ts
 ```
 
-That command requires the named file to exist. `--no-extensions` disables ambient extension discovery; the explicit extension still loads.
+`--no-extensions` disables ambient discovery; the explicit extension still loads. To install this checkout as a plugin for future sessions:
 
-Register extension entry points in the root `package.json` under `omp.extensions`, using repository-relative paths such as `"./omp/extensions/my-extension.ts"`. Keep the list empty until a real extension exists; do not add legacy `pi` manifest fields.
+```sh
+omp plugin link .
+```
 
 Oh My Pi discovers bundled skills and prompts as siblings of a loaded plugin package. Linking this repository's root with `omp plugin link .` does not make the nested `omp/skills/` directory a sibling of the root manifest. Use the explicit skill links above for this layout.
+
+### English reviewer
+
+The reviewer helps a Russian-speaking developer practice English without turning the coding agent into a language tutor. It runs a separate, tool-free model request alongside the coding task. When the coding run finishes, an **English review** panel appears above the editor. In the TUI, a tinted background, padding, and an accent-marked heading distinguish it from the coding answer; saved reviews use the same styling on transcript replay. RPC clients receive plain Markdown and control their own presentation.
+
+| Command | Behavior |
+| --- | --- |
+| `/english` or `/english status` | Show the current mode and reviewer model on demand; no persistent status appears below the prompt. |
+| `/english async` or `/english on` | Review in parallel and show feedback after the coding response (default). |
+| `/english off` | Stop reviewing and discard outstanding feedback. |
+| `/english strict` | Finish and display the review before submitting the request to the coding agent. The original request still proceeds unchanged; this isn't a rewrite gate. |
+| `/english model <selector>` | Choose a configured model, such as `openai/gpt-4.1-mini`, `openrouter/google/gemini-2.5-flash-lite`, or a role alias. |
+
+The default reviewer model is **`@smol`**, resolved through OMP's active model roles. It uses the selected provider's existing credentials and endpoint configuration, including custom/local providers. Choose a fast, inexpensive model; each reviewed submission makes an additional model request. There is no silent fallback to the coding model. Unavailable models or provider errors produce a warning and don't block the coding task.
+
+Set startup choices with extension flags:
+
+```sh
+omp --no-extensions --extension ./omp/extensions/english-reviewer/index.ts \
+  --english-mode async --english-model openai/gpt-4.1-mini
+```
+
+The example model must exist in your model registry and have working credentials. `/english` changes last for the running extension instance, including session switches; they don't modify your configuration files. Startup flags apply again when the extension is reloaded.
+
+Feedback contains a correction, up to three key grammar/naturalness points explained in Russian, and a natural developer-style version. Correct English gets **“Looks good.”**; input without meaningful English prose produces no panel. The reviewer is instructed to ignore code, commands, paths, logs, identifiers, stack traces, and quoted references, and never answer the technical question.
+
+Privacy and delivery boundaries:
+
+- Ordinary TUI/RPC input is captured before template/skill expansion. Only that submission's text goes to the reviewer—not images, auto-read files, session history, the coding answer, or the coding system prompt. Embedded code/logs in the text still reach the reviewer, which is instructed not to correct them.
+- An initial positional prompt uses OMP's prepared prompt because no raw-input event is available for it. Avoid expanded templates there if you want only your own prose reviewed; submit ordinary text in the editor instead.
+- Slash commands, direct shell/Python input, continuation shortcuts, and subagent prompts aren't reviewed.
+- Feedback never changes the coding system prompt or the original request. It is stored in custom-message metadata with empty model-visible content and removed from the provider context. It cannot leak into compaction/branch-summary text.
+- OMP can steer an unwinding run even with `triggerTurn: false`. This extension uses non-triggering `nextTurn` delivery for history and a separate panel for immediate display, so feedback cannot start another coding turn. History delivery may wait until the next user turn; stored reviews render in the transcript on replay. The current panel clears on the next ordinary submission or a mode/model/session change.
+- Multiple submitted messages keep their own reviews in submission order. Disabling review, changing the reviewer, switching/branching/navigating sessions, or shutting down aborts and discards pending work. Requests have a 60-second cancellation deadline.
+- The live panel works in the TUI and RPC clients that support extension widgets. Headless print/JSON sessions skip review rather than spend a request on feedback they can't display.
+
+### Development checks
+
+```sh
+bun install
+bun run typecheck
+bun test
+```
+
+Development dependencies pin the OMP API packages to the tested version; they aren't a separate runtime/build requirement for a loaded OMP extension. The regression suite controls the reviewer-provider boundary, so it needs no credentials or paid model calls.
 
 ## nono
 
