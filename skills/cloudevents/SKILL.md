@@ -2,9 +2,12 @@
 name: cloudevents
 description: Guide for designing, producing, and consuming CloudEvents (CNCF spec v1.0). Use when the user asks about CloudEvents, event-driven architecture with standardized event envelopes, producing or consuming CloudEvents over HTTP, Kafka, AMQP, or NATS, writing CloudEvents code in Go or C#/.NET, or choosing between structured vs binary content mode. Covers spec attributes, protocol bindings, extension attributes, observability, idempotency, and common anti-patterns.
 metadata:
-  author: perplexity-computer
+  author: madPO <social@madpo.me>
   version: '1.0'
   spec_version: '1.0.2'
+  sources: >
+    CNCF CloudEvents specification, including extension attributes
+    (https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/README.md)
 ---
 
 # CloudEvents Skill

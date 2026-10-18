@@ -2,8 +2,9 @@
 name: functional-thinking
 description: Teach functional programming thinking and principles when writing or reviewing code. Load when the user asks to write code in a functional style, refactor code to be more functional, review code for side effects and purity, design immutable data structures, use higher-order functions, or apply layered architecture. Language-agnostic — principles apply to any language. Covers actions/calculations/data distinction, immutability, first-class functions, functional iteration, timeline analysis for async code, and reactive/layered architecture patterns.
 metadata:
-  author: distilled from Eric Normand "Grokking Simplicity"
+  author: madPO <social@madpo.me>
   version: '1.0'
+  sources: 'Distilled from Eric Normand, "Grokking Simplicity"'
 ---
 
 # Functional Thinking

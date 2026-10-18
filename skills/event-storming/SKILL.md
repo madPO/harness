@@ -2,6 +2,7 @@
 name: event-storming
 description: Extract Spec Kit–style use-cases from the user's input, then derive one or more business processes modeled with EventStorming from those use-cases. Use when asked to decompose application workflows, user journeys, or business narratives into events, commands, actors, policies, aggregates, read models, external systems, and hotspots. Produce prioritized user journeys with independently testable acceptance scenarios and a traceable textual model with explicit causal links, process boundaries, alternative outcomes, and unresolved questions; not implementation code or a deployment architecture.
 metadata:
+  author: madPO <social@madpo.me>
   version: '1.3'
 ---
 

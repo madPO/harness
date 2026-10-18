@@ -2,7 +2,7 @@
 name: ui-component-design
 description: Use when designing, reviewing, or building UI components. Provides design system-agnostic principles for color, typography, spacing, motion, interactive states, iconography, and UX writing — distilled from Adobe Spectrum and industry best practices. Includes guidance for finding and applying Heroicons at the correct size and variant. Load when asked to design a component, create a UI, review a design, write UI copy, choose icons, or apply a design system.
 metadata:
-  author: social@madpo.me
+  author: madPO <social@madpo.me>
   version: '1.1'
   sources: >
     Adobe Spectrum (spectrum.adobe.com), including Using Color, Color Fundamentals,

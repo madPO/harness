@@ -2,8 +2,9 @@
 name: git-commit
 description: "Generate well-structured git commit messages following Conventional Commits specification. Use when the user asks to write a commit message, format a commit, describe changes as a commit, or generate a git commit. Always appends Assisted-by: AI-agent footer trailer. Supports types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert."
 metadata:
-  author: social@madpo.me
+  author: madPO <social@madpo.me>
   version: '1.0'
+  sources: Conventional Commits specification
 ---
 
 # Git Commit Skill
