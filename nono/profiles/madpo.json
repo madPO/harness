@@ -5,7 +5,7 @@
   "meta": {
     "name": "omp",
     "version": "1.0.0",
-    "description": "Oh My Pi development profile for Go, JavaScript, .NET, and browser tooling"
+    "description": "Oh My Pi development profile for Go, JavaScript, Rust, .NET, and browser tooling"
   },
   "commands": {
     "allow": [
@@ -27,6 +27,9 @@
 
       "$HOME/.bun",
       "$HOME/.npm",
+
+      "$HOME/.cargo",
+      "$HOME/.rustup",
 
       "$HOME/go",
       "/usr/local/go",
@@ -55,6 +58,8 @@
     ],
     "read": [
       "/etc",
+      "/usr/include",
+      "/usr/local/include",
       "$XDG_CONFIG_HOME/git",
       "$XDG_DATA_HOME/fnm",
       "$XDG_DATA_HOME/pnpm",
@@ -89,6 +94,12 @@
       "*.npmjs.org",
       "bun.sh",
 
+      "crates.io",
+      "*.crates.io",
+      "rust-lang.org",
+      "*.rust-lang.org",
+      "sh.rustup.rs",
+
       "*.nuget.org",
       "nuget.org",
       "pkgs.dev.azure.com",
@@ -105,7 +116,9 @@
       3000,
       5000,
       5001,
-      5173
+      5173,
+      8000,
+      8080
     ],
     "no_proxy": [
       "localhost",
