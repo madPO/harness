@@ -29,14 +29,12 @@ Keep this routing policy active throughout the session. Load full skills on dema
 
 # Agent routing and delegation
 
-## Smart coordinator, lightweight implementers
+## Coordinator and implementation agents
 
 - This split applies to the top-level main agent. The main agent owns requirements interpretation, repository investigation, architectural decisions, implementation contracts, coordination, acceptance, and the final report. Implementation subagents own code changes under those contracts; they must not recursively delegate merely because this policy is also visible to them.
 - The main agent does not write implementation: no production method bodies, tests, runtime configuration, scaffolding, implementation patches, or algorithmic pseudocode for a worker to transcribe. This includes one-line fixes and repair work after review. It may inspect code, run authorized checks, and directly write requested planning, architecture, or agent-policy documentation; it must not disguise implementation as a planning artifact.
 - Make architectural decisions before dispatch: inspect existing paths, callers, contracts, and test conventions; choose responsibilities, dependency direction, data flow, and failure behavior. Use read-only specialists for bounded evidence or advice when useful, but the main agent resolves the design and gives workers a coherent contract.
 - Use `coder` as the default implementation worker and `team-executor` for independent owned concurrent lanes. Use a suitable implementation specialist when its expertise is needed, always under the main agent's fixed architecture and ownership boundaries. Missing architecture is a reason for the main agent to investigate and decide, not to send an open-ended design-and-build assignment.
-- Implementation workers use the configured lightweight `@task` model role. Keep an agent's default when it already uses `@task`; otherwise request the supported per-task model override (for example, `model: "@task"` on the named task item). Do not silently use a stronger implementation model or promote the main agent into coding when a worker is blocked. Report missing role/model capabilities and preserve the blocker; a model escalation needs explicit authorization.
-- The main agent stays on the capable model selected for its session. These rules do not switch models or create an operating-system/tool sandbox; configure the main session and `modelRoles.task` in the runtime. Advisory/review roles may retain their own configured models because they do not implement.
 
 ## Select the work mode before dispatch
 
@@ -53,12 +51,12 @@ Keep this routing policy active throughout the session. Load full skills on dema
 | Task condition | Route |
 | --- | --- |
 | Implementation needs repository discovery or architectural decisions | Main agent investigates and decides; delegate the resulting fixed implementation contract to `coder` |
-| Implementation under parent-supplied fixed design/contracts and allowed paths | `coder` using `@task` |
+| Implementation under parent-supplied fixed design/contracts and allowed paths | `coder` |
 | Known local implementation change, including a one-line fix | `coder` with a compact contract; `sisyphus-lite` only when explicitly selected, also under the fixed contract |
-| UI implementation under approved interaction/component decisions | `designer` with matching UI skills and `@task` model override; unresolved design decisions remain with the main agent |
-| Known compiler or build failure requiring repair | Main agent approves the repair direction; `build-fixer` implements within that contract using `@task` |
+| UI implementation under approved interaction/component decisions | `designer` with matching UI skills; unresolved design decisions remain with the main agent |
+| Known compiler or build failure requiring repair | Main agent approves the repair direction; `build-fixer` implements within that contract |
 | Causal diagnosis needed before selecting a repair | `debugger`; route implementation separately only when diagnosis supports it and changes are authorized |
-| Dedicated automated test coverage, test infrastructure, or flake repair | Main agent sets behavioral coverage/constraints; `test-engineer` implements using `@task` |
+| Dedicated automated test coverage, test infrastructure, or flake repair | Main agent sets behavioral coverage/constraints; `test-engineer` implements |
 | Interactive CLI/service behavior testing and managed test sessions | `qa-tester` |
 | Code review or re-review | Load `code-review`; let the skill select canonical or explicitly requested standalone roles and integration |
 | Independent completion proof required by the task or verification plan | `verifier`; within code review, follow the skill's verification trigger and permissions |
@@ -81,7 +79,7 @@ Workers choose local implementation details within the contract: method bodies, 
 
 ## Dispatch and ownership
 
-- Give every implementation worker the architecture handoff above, relevant skills/rules, dependencies, and its selected lightweight model. Include the necessary context explicitly; do not assume conversation or loaded-skill inheritance. Read-only research/advisory tasks need only their bounded question, evidence scope, and output requirements.
+- Give every implementation worker the architecture handoff above, relevant skills/rules, and dependencies. Include the necessary context explicitly; do not assume conversation or loaded-skill inheritance. Read-only research/advisory tasks need only their bounded question, evidence scope, and output requirements.
 - Name the verification owner, authorized checks, and schedule. Distinguish implementation completion from observed verification; checks reserved for the parent or integration stage remain deferred, never implicitly passed.
 - Dispatch independent substantial slices together through native `task` syntax (`tasks[]`, with a named role in each item's `agent` field). Sequence actual dependencies. Do not create parallel lanes merely to increase agent count.
 - Keep each shared file/interface under one integration owner. An adjacent change required for correctness still needs explicit main-agent authorization or reassignment before edits; another worker's agreement alone is insufficient. The main agent decides integration changes, then assigns the actual edits to an implementation worker. Continue independent owned work while the decision is pending.
@@ -90,7 +88,7 @@ Workers choose local implementation details within the contract: method bodies, 
 
 ## Integrate and verify
 
-- Inspect returned changes for architectural conformance, contract compatibility, scope, and acceptance evidence. A worker's completion claim alone is not proof. Return incomplete or incorrect implementation to a lightweight worker with the violated contract and expected behavior; revise architectural decisions when evidence requires it, but do not supply a corrective implementation patch or silently weaken the task.
+- Inspect returned changes for architectural conformance, contract compatibility, scope, and acceptance evidence. A worker's completion claim alone is not proof. Return incomplete or incorrect implementation to an implementation worker with the violated contract and expected behavior; revise architectural decisions when evidence requires it, but do not supply a corrective implementation patch or silently weaken the task.
 - Run or assign the relevant authorized verification after shared edits finish. Reuse current, applicable evidence rather than duplicating checks; preserve failed, missing, stale, or inconclusive proof and its limitations.
 - For code review, preserve the `code-review` skill's role selection, adjudication, verdict, and reporting contracts. Do not add automatic review lanes, self-approve when independent review is unavailable, or turn a verification failure into a patch defect without attribution.
 - Return the integrated outcome, affected paths, observed verification, and exact blockers. Keep implementation status and verification status separate; do not present a deferred or unverified handoff as verified completion.
