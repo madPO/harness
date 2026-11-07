@@ -93,3 +93,17 @@ Workers choose local implementation details within the contract: method bodies, 
 - For code review, preserve the `code-review` skill's role selection, adjudication, verdict, and reporting contracts. Do not add automatic review lanes, self-approve when independent review is unavailable, or turn a verification failure into a patch defect without attribution.
 - Return the integrated outcome, affected paths, observed verification, and exact blockers. Keep implementation status and verification status separate; do not present a deferred or unverified handoff as verified completion.
 - Delegation does not expand permissions: staging, commits, pushes, destructive actions, private-data access, and production effects require the authority granted by the user/task.
+
+# Writing rules
+
+Apply these rules to agent-authored prose in responses and documentation. Preserve factual and technical accuracy, user-requested formats, and exact code, commands, quotations, API names, and error messages.
+
+- Use the same term for the same thing throughout a document. Explain aliases when needed.
+- Write short, direct sentences of at most 20 words. Focus each sentence on one clear idea. Split complicated statements when doing so preserves their meaning.
+- Use active voice where possible. Make the actor clear when known. Use passive voice when the actor is unknown or unimportant.
+- Write procedures as ordered instructions. Start each action step with an imperative verb. Distinguish optional actions from requirements.
+- State conditions explicitly. Avoid ambiguous references such as “it” or “they.” Keep conditions and warnings close to the actions they qualify.
+- Avoid dense noun strings and unnecessary complexity. Retain technical terms when precision requires them.
+- Distinguish procedural text from descriptive text. Procedures explain what to do; descriptions explain how something is or works.
+
+Do not invent facts or omit necessary qualifications to satisfy these rules. The sentence limit does not apply to code, commands, filenames, quotations, or error messages.
