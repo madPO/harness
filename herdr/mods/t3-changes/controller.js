@@ -8,27 +8,33 @@ export class ChangesController {
       loading: false, busy: false, closed: false, generation: 0, diffGeneration: 0, drafts: new Map() });
   }
 
+  // Render may invalidate JavaScript state, but notifications and native input writes stay deferred.
+  transition(context = this.location()) {
+    const key = contextKey(context);
+    if (this.closed || key === this.context) return false;
+    this.context = key; this.snapshot = null; this.selected = null; this.diff = null; this.error = null;
+    this.diffGeneration++; this.generation++; this.loading = false;
+    return true;
+  }
+
   draft(snapshot = this.snapshot) {
-    if (!snapshot?.root) return { subject: "", description: "" };
+    if (!snapshot?.root) return { message: "" };
     const key = repositoryKey(snapshot);
-    if (!this.drafts.has(key)) this.drafts.set(key, { subject: "", description: "" });
+    if (!this.drafts.has(key)) this.drafts.set(key, { message: "" });
     return this.drafts.get(key);
   }
 
-  setDraft(field, value) {
-    if (!this.snapshot?.root || !["subject", "description"].includes(field)) return;
-    this.drafts.set(repositoryKey(this.snapshot), { ...this.draft(), [field]: value });
+  setDraft(message) {
+    if (this.closed || !this.snapshot?.root || contextKey(this.location()) !== this.context) return;
+    this.drafts.set(repositoryKey(this.snapshot), { message });
     this.changed();
   }
 
   async refresh() {
     if (this.closed) return;
-    const context = this.location(), key = contextKey(context), switched = key !== this.context;
-    if (switched) {
-      this.context = key; this.snapshot = null; this.selected = null; this.diff = null; this.error = null;
-      this.diffGeneration++; this.generation++; this.loading = false;
-    }
-    if (this.loading || this.busy && !switched) return;
+    const context = this.location(), key = contextKey(context);
+    this.transition(context);
+    if (this.loading || this.busy && this.snapshot) return;
     const generation = ++this.generation;
     const current = () => !this.closed && this.generation === generation && contextKey(this.location()) === key;
     this.loading = true; this.changed();
@@ -49,6 +55,7 @@ export class ChangesController {
   }
 
   async select(file) {
+    if (this.closed || !this.snapshot || contextKey(this.location()) !== this.context) return;
     const sameFile = file && selectionKey(file) === selectionKey(this.selected);
     this.selected = file;
     const generation = ++this.diffGeneration, context = this.context, snapshot = this.snapshot;
@@ -67,7 +74,7 @@ export class ChangesController {
   }
 
   async mutate(action) {
-    if (this.closed || this.busy || this.loading || !this.snapshot) return;
+    if (this.closed || this.busy || this.loading || !this.snapshot || contextKey(this.location()) !== this.context) return;
     const snapshot = this.snapshot, context = this.context, generation = this.generation, draft = { ...this.draft(snapshot) };
     this.busy = true; this.error = null; this.changed();
     const current = () => !this.closed && this.generation === generation && contextKey(this.location()) === context && this.context === context;
@@ -76,7 +83,7 @@ export class ChangesController {
       if (result.ok && action.type === "commit") {
         // Don't erase edits entered while Git hooks were running.
         const key = repositoryKey(snapshot), latest = this.drafts.get(key);
-        if (latest?.subject === draft.subject && latest?.description === draft.description) this.drafts.set(key, { subject: "", description: "" });
+        if (latest?.message === draft.message) this.drafts.set(key, { message: "" });
       }
       if (!result.ok && current()) this.error = result.message;
     } finally {

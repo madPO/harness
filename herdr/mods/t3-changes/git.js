@@ -68,7 +68,7 @@ export async function perform(snapshot, action, exec, isCurrent = () => true) {
     const conflicts = fresh.files.some((file) => file.conflict);
     let args;
     if (action.type === "commit") {
-      args = commitArgs(action.subject, action.description);
+      args = commitArgs(action.message);
       if (conflicts) throw new Error("Resolve conflicts outside Changes before committing");
       if (!fresh.groups.staged.length) throw new Error("Stage changes before committing");
     } else if (action.type === "stage" || action.type === "unstage") {

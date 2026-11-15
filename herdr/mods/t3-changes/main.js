@@ -1,17 +1,13 @@
 import { View, div, svg } from "gpui-kit";
-import { h_flex, v_flex, Input, InputState, Scrollbar, v_virtual_list } from "gpui-base";
+import { h_flex, v_flex, Textarea, TextareaState, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
 import { ChangesController } from "./controller.js";
-import { displayPath, contextKey, repositoryKey, selectionKey, fileTree, treeRows } from "./model.js";
+import { displayPath, repositoryKey, selectionKey, fileTree, treeRows } from "./model.js";
 import { TREE_ROW, treeRow, statusBadge } from "./tree-row.js";
+import { resolveContext } from "./context.js";
 
-const UI = { sidebar: 264, narrow: 560, header: 76, diffRow: 24, text: 12, code: 12, radius: 5 };
-function location() {
-  const space = spaces().find((s) => s.active), f = focused();
-  const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
-  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
-}
+const UI = { sidebar: 264, narrow: 560, header: 76, diffRow: 24, diffScrollbar: 16, text: 12, code: 12, radius: 5, commitRadius: 8, commitHeight: 36 };
+const location = () => resolveContext(spaces(), panes(), focused());
 
 export default class Changes extends View {
   init(_props, cx) {
@@ -19,25 +15,35 @@ export default class Changes extends View {
     this.handles = Object.fromEntries(["refresh", "unstaged", "staged", "stage-all", "unstage-all", "commit", "tree"].map((id) => [id, cx.focus_handle()]));
     this.collapsed = new Set(); this.folded = new Set(); this.width = 900; this.height = 600; this.treeTop = 0; this.treeHeight = 240;
     this.id = `t3-changes-${Math.random().toString(36).slice(2)}`;
-    this.controller = new ChangesController({ exec, location, changed: () => cx.notify(), publish: () => setShared("git-graph.changed", Date.now()) });
-    this.inputs = Object.fromEntries(["subject", "description"].map((field) => {
-      const state = InputState.new({ placeholder: field === "subject" ? "Commit subject" : "Add more detail…", value: "" });
-      state.on("change", (_e, cx) => { if (!this.syncing) this.controller.setDraft(field, state.value()); cx.notify(); });
-      state.on("focus", (_e, cx) => { this.inputFocus = field; cx.notify(); });
-      state.on("blur", (_e, cx) => { if (this.inputFocus === field) this.inputFocus = null; cx.notify(); });
-      // Neither field submits a commit accidentally. Commit is an explicit action.
-      return [field, state];
-    }));
+    this.messageState = TextareaState.new({ placeholder: "Commit message", value: "", rows: 1 });
+    this.messageState.set_auto_grow(1, 5);
+    this.messageState.set_soft_wrap(true);
+    this.controller = new ChangesController({ exec, location, changed: () => { this.syncMessage(); cx.notify(); },
+      publish: () => setShared("git-graph.changed", Date.now()) });
+    this.messageState.on("change", (_e, cx) => { if (!this.syncing) this.controller.setDraft(this.messageState.value()); cx.notify(); });
+    this.messageState.on("focus", (_e, cx) => { this.messageFocused = true; cx.notify(); });
+    this.messageState.on("blur", (_e, cx) => { this.messageFocused = false; cx.notify(); });
+    // Native Enter and Shift+Enter insert newlines. Only the Commit button submits.
     this.start(cx, () => this.controller.refresh());
     this.focusWatch = cx.timer.every(150, (cx) => {
+      const switched = this.requestContext(cx);
       const key = Object.entries(this.handles).find(([, handle]) => handle.is_focused())?.[0];
-      if (key !== this.focusedControl) { this.focusedControl = key; cx.notify(); }
+      if (key !== this.focusedControl || switched) { this.focusedControl = key; cx.notify(); }
     });
   }
 
-  close() { this.controller.close(); this.focusWatch?.cancel(); }
+  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.messageState.release(); }
   start(cx, action) { cx.spawn(async () => { await action(); }); }
   mutate(cx, action) { this.start(cx, () => this.controller.mutate(action)); }
+
+  requestContext(cx) {
+    if (!this.controller.transition()) return false;
+    if (!this.contextWork) this.contextWork = cx.timer.after(0, (cx) => {
+      this.contextWork = null;
+      if (!this.controller.closed) this.start(cx, () => this.controller.refresh());
+    });
+    return true;
+  }
 
   control(t, id, label, content, action, { disabled = false, primary = false } = {}) {
     const handle = this.handles[id];
@@ -53,11 +59,11 @@ export default class Changes extends View {
     return el;
   }
 
-  syncInputs() {
+  syncMessage() {
     const c = this.controller, draft = c.draft(), key = c.snapshot?.root ? repositoryKey(c.snapshot) : "";
     this.syncing = true;
     try {
-      for (const field of ["subject", "description"]) if (this.inputs[field].value() !== draft[field]) this.inputs[field].set_value(draft[field]);
+      if (this.messageState.value() !== draft.message) this.messageState.set_value(draft.message);
       if (key !== this.inputRepository) { this.inputRepository = key; this.treeTop = 0; this.treeAt = 0; }
     } finally { this.syncing = false; }
   }
@@ -140,31 +146,30 @@ export default class Changes extends View {
       }).children(rows.slice(first, end).map((row, i) => draw(row, first + i)));
   }
 
-  commitForm(t) {
+  commitFooter(t) {
     const c = this.controller, ready = c.snapshot?.state === "ready", staged = c.snapshot?.groups.staged.length ?? 0;
-    const conflict = c.snapshot?.files.some((file) => file.conflict);
-    const field = (name, title, height) => v_flex().gap(7)
-      .child(h_flex().items_center().child(div().font_medium().child(title)).child(div().flex_1())
-        .when(name === "description", (e) => e.child(div().text_size(10).text_color(t.muted).child("Optional"))))
-      .child(Input.new(this.inputs[name]).h(height).px(10).rounded(UI.radius).bg(t.input).text_size(11).text_color(t.foreground)
-        .border(this.inputFocus === name ? 2 : 1).border_color(this.inputFocus === name ? t.accent : t.input).accessibility_label(`Commit ${name}`));
-    return v_flex().flex_none().p(18).gap(12).border_t(1).border_color(t.border).text_size(11)
-      .child(field("subject", "Subject", 36)).child(field("description", "Description", 52))
+    const conflict = c.snapshot?.files.some((file) => file.conflict), message = c.draft().message;
+    return v_flex().w_full().flex_none().p(12).gap(8).border_t(1).border_color(t.border).text_size(UI.text)
+      .child(h_flex().w_full().min_w(0).items_start().gap(8)
+        .child(Textarea.new(this.messageState).flex_1().min_w(0).min_h(UI.commitHeight).px(10).py(6)
+          .rounded(UI.commitRadius).bg(t.input).text_size(UI.text).line_height("20px").text_color(t.foreground)
+          .border(2).border_color(this.messageFocused ? t.accent : t.border).accessibility_label("Commit message"))
+        .child(this.control(t, "commit", "Commit staged changes only", c.busy ? "Working…" : "Commit", (cx) => this.mutate(cx, { type: "commit" }),
+          { primary: true, disabled: !ready || c.busy || c.loading || conflict || !staged || !message.trim() || message.includes("\0") })
+          .h(UI.commitHeight).px(14).rounded(UI.commitRadius)))
       .when(Boolean(conflict), (e) => e.child(div().text_color(t.ansi1).child("Resolve conflicts outside Changes before staging or committing.")))
-      .when(Boolean(ready && !staged), (e) => e.child(div().text_color(t.muted).text_size(10).child("Stage files to include them in the commit.")))
-      .child(this.control(t, "commit", "Commit staged changes only", c.busy ? "Working…" : "Commit", (cx) => this.mutate(cx, { type: "commit" }),
-        { primary: true, disabled: !ready || c.busy || c.loading || conflict || !staged || !c.draft().subject.trim() }).h(36).w_full());
+      .when(Boolean(ready && !staged), (e) => e.child(div().text_color(t.muted).text_size(10).child("Stage files to include them in the commit.")));
   }
 
   sidebar(t, narrow) {
     const c = this.controller, count = c.snapshot?.files.length ?? 0;
     return v_flex().min_h(0).when(!narrow, (e) => e.w(UI.sidebar).h_full().flex_none().border_l(1).border_color(t.border))
-      .when(narrow, (e) => e.w_full().h(Math.max(460, this.height * 0.53)).flex_none().border_t(1).border_color(t.border))
+      .when(narrow, (e) => e.w_full().h(Math.max(240, this.height * 0.53)).flex_none().border_t(1).border_color(t.border))
       .child(h_flex().h(UI.header).flex_none().px(18).gap(12).items_center().child(div().font_semibold().child("Changes"))
         .child(div().px(7).py(3).rounded(4).bg(t.raised).text_size(10).child(String(count))).child(div().flex_1())
         .child(this.control(t, "refresh", "Refresh changes", svg("mods/git-graph/icons/refresh.svg").size(14), (cx) => this.start(cx, () => c.refresh()), { disabled: c.loading || c.busy })))
       .when(c.busy, (e) => e.child(div().px(18).pb(6).text_size(10).text_color(t.muted).child("Updating repository…")))
-      .child(this.tree(t)).child(this.commitForm(t));
+      .child(this.tree(t));
   }
 
   diffRow(row, t) {
@@ -192,26 +197,33 @@ export default class Changes extends View {
         .child(div().flex_1().min_w(0).truncate().font_semibold().child(file ? displayPath(file.path) : "Changes")))
       .when(Boolean(c.error), (e) => e.child(v_flex().max_h(120).overflow_y_scrollbar().p(14).gap(6).text_color(t.ansi1)
         .child("Git couldn't complete the request").child(c.error).child(div().text_color(t.muted).child("Check Git's message, then refresh or try again. Your commit draft is unchanged."))))
-      .child(div().flex_1().min_h(0).relative().font_family(settings()?.font_family ?? "JetBrains Mono").text_size(UI.code)
-        .when(!rows, (e) => e.child(div().p(20).text_color(t.muted).child(message)))
-        .when(Boolean(rows), (e) => e.child(div().id(`${this.id}-diff-x`).size_full().overflow_x_scrollbar()
-          .child(div().w_full().min_w(width).h_full().child(v_virtual_list(`${this.id}-diff`, rows.length, UI.diffRow, (i) => String(i),
-            (range) => rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-          .child(Scrollbar.vertical(`${this.id}-diff`).viewport_from_layout().absolute().inset_0())));
+      .child(v_flex().flex_1().min_w(0).min_h(0).font_family(settings()?.font_family ?? "JetBrains Mono").text_size(UI.code)
+        .child(div().flex_1().w_full().min_w(0).min_h(0).relative()
+          .when(!rows, (e) => e.child(div().p(20).text_color(t.muted).child(message)))
+          .when(Boolean(rows), (e) => e.child(div().id(`${this.id}-diff-x`).size_full().min_w(0).overflow_x_scroll()
+            // Let the native list handle vertical wheel events before blocking the horizontal parent.
+            .child(div().w_full().min_w(width).h_full().on_scroll_wheel((_e, cx) => cx.stop_propagation())
+              .child(v_virtual_list(`${this.id}-diff`, rows.length, UI.diffRow, (i) => String(i),
+                (range) => rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
+            .child(Scrollbar.vertical(`${this.id}-diff`).viewport_from_layout().absolute().inset_0())))
+        .when(Boolean(rows), (e) => e.child(div().w_full().min_w(0).h(UI.diffScrollbar).flex_none().relative()
+          .on_scroll_wheel((_e, cx) => cx.stop_propagation())
+          .child(Scrollbar.horizontal(`${this.id}-diff-x`).mode("always").viewport_from_layout().absolute().inset_0()))));
   }
 
   render(cx) {
-    const c = this.controller;
-    if (contextKey(location()) !== c.context) this.start(cx, () => c.refresh());
-    this.syncInputs();
+    this.requestContext(cx);
     const t = theme(), narrow = this.width < UI.narrow;
-    return (narrow ? v_flex() : h_flex()).id(this.id).size_full().min_h(0).min_w(0).items_start().bg(t.background).text_color(t.foreground).text_size(UI.text)
+    return v_flex().id(this.id).size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(UI.text)
       .track_focus(this.handle).on_key_down((e, cx) => {
         if (this.handle.is_focused() && ["down", "enter", "tab"].includes(e.key)) { this.handles.tree.focus(); cx.stop_propagation(); cx.notify(); }
       }).on_size_change((size, cx) => {
         const unit = Number(settings()?.zoom) || 1, width = size.width / unit, height = size.height / unit;
         if (width !== this.width || height !== this.height) { this.width = width; this.height = height; cx.notify(); }
-      }).when(narrow, (e) => e.overflow_y_scrollbar())
-      .child(this.diff(t, narrow)).child(this.sidebar(t, narrow));
+      })
+      .child((narrow ? v_flex() : h_flex()).w_full().flex_1().min_h(0).min_w(0).items_start()
+        .when(narrow, (e) => e.overflow_y_scrollbar())
+        .child(this.diff(t, narrow)).child(this.sidebar(t, narrow)))
+      .child(this.commitFooter(t));
   }
 }

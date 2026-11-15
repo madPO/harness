@@ -10,8 +10,9 @@ export class ChangesController {
   busy: boolean;
   closed: boolean;
   context?: string;
+  transition(context?: Location): boolean;
   draft(snapshot?: Snapshot | null): Draft;
-  setDraft(field: keyof Draft, value: string): void;
+  setDraft(message: string): void;
   refresh(): Promise<void>;
   select(file: ChangeFile | null): Promise<void>;
   mutate(action: Action): Promise<void>;

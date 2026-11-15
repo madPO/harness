@@ -2,7 +2,7 @@
 const CONFLICTS = { DD: true, AU: true, UD: true, UA: true, DU: true, AA: true, UU: true };
 const STATES = /^[ MADRCUT?!]{2}$/;
 export const displayPath = (path) => path.replace(/[\x00-\x1f\x7f]/g, (c) => c === "\n" ? "\\n" : c === "\t" ? "\\t" : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
-export const contextKey = ({ cwd, on }) => JSON.stringify([on ?? null, cwd ?? null]);
+export const contextKey = ({ space, cwd, on }) => JSON.stringify([space ?? null, on ?? null, cwd || null]);
 export const repositoryKey = ({ root, on }) => JSON.stringify([on ?? null, root]);
 export const selectionKey = (file) => file ? JSON.stringify([file.group, file.path]) : "";
 
@@ -89,8 +89,8 @@ export function parseDiff(text) {
   return rows;
 }
 
-export function commitArgs(subject, description = "") {
-  if (typeof subject !== "string" || !subject.trim()) throw new Error("Enter a commit subject");
-  if (/[\r\n\0]/.test(subject) || description.includes("\0")) throw new Error("Use one line for the commit subject");
-  return ["commit", "--cleanup=verbatim", "-m", subject.trim(), ...(description.trim() ? ["-m", description] : [])];
+export function commitArgs(message) {
+  if (typeof message !== "string" || !message.trim()) throw new Error("Enter a commit message");
+  if (message.includes("\0")) throw new Error("Commit messages can't contain NUL characters");
+  return ["commit", "--cleanup=verbatim", "-m", message];
 }
