@@ -187,7 +187,7 @@
           "children": [
             { "id": "files", "type": "block", "content": { "mod": "t3-files" } },
             { "id": "git", "type": "block", "content": { "mod": "git-graph" } },
-            { "id": "changes", "type": "block", "content": { "mod": "annotator" } }
+            { "id": "changes", "type": "block", "content": { "mod": "t3-changes" } }
           ]
         },
         { "id": "panel-bottom-inset", "type": "row", "size": { "px": 8 }, "children": [] }
