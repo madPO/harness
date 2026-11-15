@@ -5,6 +5,13 @@
       "type": "http",
       "url": "https://design.penpot.app/mcp/stream?userToken=${PENPOT_TOKEN}"
     },
+    "obsidian-vault": {
+      "type": "http",
+      "url": "http://localhost:8765/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OBSIDIAN_VAULT_TOKEN}"
+      }
+    },
     "playwright": {
       "command": "npx",
       "args": ["@playwright/mcp@latest", "--headless", "--no-sandbox"]
