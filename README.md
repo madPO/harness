@@ -1,6 +1,6 @@
 # Personal AI agent toolkit
 
-Personal extensions, skills, and configuration for [Oh My Pi](https://github.com/can1357/oh-my-pi), plus a [nono](https://nono.sh/docs) sandbox profile.
+Personal extensions, skills, and configuration for [Oh My Pi](https://github.com/can1357/oh-my-pi), a [nono](https://nono.sh/docs) sandbox profile, and a Herdr layout.
 
 ## Layout
 
@@ -10,6 +10,7 @@ Personal extensions, skills, and configuration for [Oh My Pi](https://github.com
 | `omp/skills/` | Code review, CloudEvents, EventStorming, functional thinking, Git commits, and UI design skills. |
 | `omp/agent/` | Specialist task agents, model/tool settings, skill routing, personality, LSP, and MCP configuration. |
 | `nono/profiles/madpo.json` | Sandbox profile for Go, JavaScript, Rust, .NET, and browser tooling. |
+| `herdr/` | Herdr T3 layout, mods, key bindings, and upstream license. |
 
 ## Oh My Pi
 
@@ -122,6 +123,41 @@ The `developer` network policy covers common registries, Git hosts, documentatio
 For MCP, merge `omp/agent/mcp.json` into your active configuration. Set `PENPOT_TOKEN` outside the repository and connect the Penpot MCP plugin in the design file. Playwright runs headless Chrome with `--no-sandbox` (disabling Chrome's sandbox, not nono's). Remote browsing through nono's proxy requires explicit Playwright `browser.launchOptions.proxy` settings with the current server and separate username/password; Chrome does not automatically use `HTTPS_PROXY`. Keep destination domains allowed rather than weakening network isolation.
 
 For Obsidian, install and enable the [Vault as MCP plugin](https://github.com/ebullient/obsidian-vault-mcp), then start its server. The default endpoint is `http://localhost:8765/mcp`. If plugin authentication is enabled, configure a Bearer `Authorization` header outside the repository. Ensure `localhost` reaches Obsidian; WSL networking may require a reachable host address instead.
+
+## Herdr
+
+`herdr/` contains [Herdr T3](https://github.com/JinJieBeWater/herdr-t3) at commit [`9a9fd18c88d3312577382944b42593c7d27e98fb`](https://github.com/JinJieBeWater/herdr-t3/tree/9a9fd18c88d3312577382944b42593c7d27e98fb). It also includes [Git Graph](https://github.com/rabeeh-ta/herdr-git-graph) at commit [`0da886243b2e27a6068d6adb7c5c26f349cdc04e`](https://github.com/rabeeh-ta/herdr-git-graph/tree/0da886243b2e27a6068d6adb7c5c26f349cdc04e). The Changes page uses [Herdr Annotator](https://github.com/jakub-tucek/herdr-annotator), installed separately; these instructions reference upstream commit [`ced943905c7823cc3837cbdf6118e676de9f34f2`](https://github.com/jakub-tucek/herdr-annotator/tree/ced943905c7823cc3837cbdf6118e676de9f34f2). The layout and mods require Herdr App. T3 does not specify a minimum Herdr version. Git Graph reports testing on macOS with Herdr 0.1.9–0.1.12; Linux and Windows are untested. Optional T3 extras, including Review and themes, are not included.
+
+Annotator requires macOS or Linux, Herdr App, herdr-core (`hc`), Git, Rust, and Python 3. GitHub review threads also require an authenticated GitHub CLI (`gh`) on the app machine; local reviews work without it. Windows is not supported by Annotator. Remote machines need no Annotator installation. The layout also references Herdr's built-in `workspace-status`; its runtime availability has not been verified. The Changes tab icon uses Herdr's built-in `changes` asset, not its mod.
+
+Install from this repository's root:
+
+1. Back up `~/.config/herdr-app/`, including existing `layouts/`, `mods/`, and `keys.json`. Back up any existing Annotator installation and its local customizations before proceeding.
+2. Clone [Herdr Annotator](https://github.com/jakub-tucek/herdr-annotator) separately and run `python3 scripts/install.py` from that clone, without `--layout`. The installer builds the Rust helper and installs the mod, updater, and receipt; none are included in this repository. Keep the clone for updates. The installer refuses to overwrite unrecognized or locally edited installed files.
+3. Do not use Annotator's `--layout` option for T3. That option requires stock tabs and rejects T3's `t3-tabs`; it would also install a separate tabs integration. The standalone installer leaves T3's tabs unchanged.
+4. Create `~/.config/herdr-app/layouts/` and `~/.config/herdr-app/mods/` if needed. Inspect destinations before copying; reconcile existing customizations rather than overwriting them blindly.
+5. Copy `herdr/layouts/herdr-t3.json` and `herdr/layouts/herdr-t3.svg` into the app's `layouts/` directory, or merge the updated Changes block into an existing customized layout. Preserve its `changes` block ID. Replacing a layout can discard its theme, focus ring, sidebar state, or added blocks.
+6. Copy each directory in `herdr/mods/t3-*` and `herdr/mods/git-graph` into the app's `mods/` directory, including `t3-chrome` on first installation. Reconcile any existing mod customizations first. Use real copies, not symlinks: upstream says mod SVGs do not load through symlinks.
+7. Merge `herdr/keys.json` into `~/.config/herdr-app/keys.json`. If no file exists, copy it there. Otherwise, merge each section and key, retaining unrelated sections and bindings. Choose explicitly between conflicting bindings. The file includes the original global and terminal bindings alongside T3 layout and mod bindings. Layout-scoped shortcuts may override global shortcuts.
+8. Select `herdr-t3` in Herdr's layout picker. See the [T3 guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md) for usage and key commands.
+
+The T3 bindings target macOS. On Linux and Windows, Herdr defaults can bypass layout rules, including close confirmation and Home-aware space numbering. Rebind those keys manually as described in the [upstream key guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md#keys).
+
+Open the right-side panel with its existing button or binding, then select **Git** beside **Files**. The panel button reopens the last selected page. Git Graph follows the focused terminal's repository and offers commit details, diffs, and Git actions. In a folder containing repositories, its Manygit view lists them. See the [Git Graph guide](https://github.com/rabeeh-ta/herdr-git-graph/tree/0da886243b2e27a6068d6adb7c5c26f349cdc04e#what-it-does) for its actions and limits. Manygit requires `find` and `env` and does not work on Windows.
+
+Select **Changes** in the same panel to review uncommitted work, the last commit, or a branch with Annotator. Use **↗** inside Annotator's Changes sidebar to open full review; T3's tabs remain unchanged. Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page. See the [Annotator guide](https://github.com/jakub-tucek/herdr-annotator/blob/ced943905c7823cc3837cbdf6118e676de9f34f2/docs/guide.md) for review controls and limits.
+
+**Permissions and effects:** Review the imported mod code before using it. T3 mods run Git, shell, and `hc` commands; they inspect local or remote space files and repositories. They write agent labels and caches, and Actions runs user-defined shell commands. Machine Connect can remove and add an `hc` machine; file actions can open local files or use the clipboard. On macOS, zoom changes can rewrite the installed layout. T3 upstream reports no network requests by the layout itself. See upstream [What it runs](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/README.md#what-it-runs) for details.
+
+Git Graph runs Git on the focused repository's machine and reads untracked files for diffs. Manygit scans folders and periodically checks listed repositories; Git status can run repository-configured clean filters. Fetch, pull, push, and remote branch deletion can access the network. Git actions can change repositories, including destructive resets; review each action's confirmation. Local branch checkout and Fetch run without confirmation.
+
+Annotator reads local or SSH checkout diffs and saves comments on the app machine. **Send review** submits saved comments and queued threads to the source agent's chat as a message; check the chat before retrying uncertain delivery. Its GitHub tab reads and polls PR threads. **Post to GitHub** explicitly posts a reply using the signed-in `gh` account. Optional **Order logically** sends file paths and bounded diff samples to the selected OpenCode or Pi model, including for SSH checkouts; model usage costs may apply.
+
+Annotator checks GitHub daily for stable tagged releases and supports manual checks. Downloads and builds start only after choosing **Update**. The updater fast-forwards the original clone, rebuilds the helper, backs up the old install, and hot-reloads mods. It refuses dirty or diverged clones and locally edited installed files. Save or cancel drafts before updating; personal layouts and saved comments remain in place. For manual reinstalls, run the standalone installer again without `--layout`. See [upstream updates](https://github.com/jakub-tucek/herdr-annotator/blob/ced943905c7823cc3837cbdf6118e676de9f34f2/README.md#updates).
+
+Git Graph also checks GitHub's public releases API at most once a day without a token or repository details. The request still reaches GitHub. The mod does not update itself. Choose **Stop checking** in its update window to disable future checks, or set `CHECK = false` in the installed `git-graph/update.js` before use. Replacing the mod can restore that code setting. See upstream [What it runs](https://github.com/rabeeh-ta/herdr-git-graph/blob/0da886243b2e27a6068d6adb7c5c26f349cdc04e/README.md#what-it-runs) and [Updating](https://github.com/rabeeh-ta/herdr-git-graph/blob/0da886243b2e27a6068d6adb7c5c26f349cdc04e/README.md#updating).
+
+Herdr T3 is Apache-2.0; see [`herdr/LICENSE`](herdr/LICENSE). Git Graph is MIT; see [`herdr/mods/git-graph/LICENSE`](herdr/mods/git-graph/LICENSE). Its copied graph icon is also used in T3 chrome; see Git Graph's [Lucide notice](herdr/mods/git-graph/icons/LICENSE-lucide.txt). The imported mod notices and bundled licenses retain third-party attribution. T3 upstream credits Herdr App, Lucide, Catppuccin icons, and uFuzzy; see its [credits](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/README.md#credits-and-license).
 
 ## Conventions
 
