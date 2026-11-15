@@ -9,7 +9,7 @@ Personal extensions, skills, and configuration for [Oh My Pi](https://github.com
 | `omp/extensions/` | English reviewer extension. |
 | `omp/skills/` | Code review, CloudEvents, EventStorming, functional thinking, Git commits, and UI design skills. |
 | `omp/agent/` | Specialist task agents, model/tool settings, skill routing, personality, LSP, and MCP configuration. |
-| `nono/profiles/omp.json` | Sandbox profile for Go, JavaScript, Rust, .NET, and browser tooling. |
+| `nono/profiles/madpo.json` | Sandbox profile for Go, JavaScript, Rust, .NET, and browser tooling. |
 
 ## Oh My Pi
 
@@ -98,9 +98,10 @@ bun test
 
 ## nono
 
-The profile extends **`nolabs-ai/pi`**, which must already be installed. Install the runtime CLIs, language servers, and Google Chrome separately. From an ordinary host shell, create cache/configuration roots before launching; nono skips grants for missing paths:
+The profile extends **`nolabs-ai/omp`**. Install that parent pack, runtime CLIs, language servers, and Google Chrome separately. From an ordinary host shell, install the pack and create cache/configuration roots before launching. nono skips grants for missing paths:
 
 ```sh
+nono pull nolabs-ai/omp
 mkdir -p "$HOME/.bun" "$HOME/.npm" "$HOME/go" \
   "$HOME/.cargo" "$HOME/.rustup" \
   "$HOME/.dotnet" "$HOME/.nuget" "$HOME/.templateengine" \
@@ -108,8 +109,8 @@ mkdir -p "$HOME/.bun" "$HOME/.npm" "$HOME/go" \
   "${XDG_CONFIG_HOME:-$HOME/.config}/git" \
   "${XDG_DATA_HOME:-$HOME/.local/share}/NuGet"
 export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/go/bin:$HOME/.dotnet/tools:$HOME/.local/bin:$PATH"
-nono profile validate ./nono/profiles/omp.json
-nono run --profile ./nono/profiles/omp.json -- omp
+nono profile validate ./nono/profiles/madpo.json
+nono run --profile ./nono/profiles/madpo.json -- omp
 ```
 
 Initialize your Node version manager first if needed; the sandbox inherits `PATH`. Review the profile's broad filesystem grants, deployment-specific `/base` and `/ralplan` paths, and any custom tool/cache locations. Git identity access does not imply credential access.

@@ -1,6 +1,6 @@
 {
   "extends": [
-    "nolabs-ai/pi"
+    "nolabs-ai/omp"
   ],
   "meta": {
     "name": "omp",
@@ -13,7 +13,6 @@
     ]
   },
   "security": {
-    "capability_elevation": false,
     "wsl2_proxy_policy": "error"
   },
   "linux": {
@@ -22,7 +21,6 @@
   "filesystem": {
     "allow": [
       "$WORKDIR",
-      "$HOME/.omp",
       "$XDG_CACHE_HOME",
 
       "$HOME/.bun",
@@ -75,7 +73,6 @@
     ]
   },
   "network": {
-    "block": false,
     "allow_http2": false,
     "network_profile": "developer",
     "allow_domain": [
