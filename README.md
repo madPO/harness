@@ -7,7 +7,8 @@ Personal extensions, skills, and configuration for [Oh My Pi](https://github.com
 | Path | Contents |
 | --- | --- |
 | `omp/extensions/` | English reviewer extension. |
-| `omp/skills/` | Code review, CloudEvents, EventStorming, functional thinking, Git commits, and UI design skills. |
+| `omp/skills/` | Code review, CloudEvents, engineering reflection, EventStorming, functional thinking, Git commits, and UI design skills. |
+| `omp/commands/` | User-invoked engineering reflection commands. |
 | `omp/agent/` | Specialist task agents, model/tool settings, skill routing, personality, LSP, and MCP configuration. |
 | `nono/profiles/madpo.json` | Sandbox profile for Go, JavaScript, Rust, .NET, and browser tooling. |
 | `herdr/` | Herdr T3 layout, mods, key bindings, and upstream license. |
@@ -26,23 +27,36 @@ omp --config ./omp/agent/config.yml
 
 For persistent settings, merge the desired values from `omp/agent/config.yml`, `lsp.json`, and `mcp.json` into their counterparts in your active agent directory. Do not overwrite existing configuration blindly.
 
-Link the always-loaded skill routing and personality, install the skills and task agents, and register the extension:
+Link the always-loaded skill routing and personality, install the skills, task agents, and commands, and register the extension:
 
 ```sh
 agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
-mkdir -p "$agent_dir/skills" "$agent_dir/agents"
+mkdir -p "$agent_dir/skills" "$agent_dir/agents" "$agent_dir/commands"
 ln -s "$PWD/omp/agent/RULES.md" "$agent_dir/RULES.md"
 ln -s "$PWD/omp/agent/PERSONALITY.md" "$agent_dir/PERSONALITY.md"
-for skill in code-review cloudevents event-storming functional-thinking git-commit ui-component-design; do
+for skill in code-review cloudevents engineering-reflection event-storming functional-thinking git-commit ui-component-design; do
   ln -s "$PWD/omp/skills/$skill" "$agent_dir/skills/$skill"
 done
 for agent in "$PWD"/omp/agent/agents/*.md; do
   ln -s "$agent" "$agent_dir/agents/"
 done
+for command in "$PWD"/omp/commands/*.md; do
+  ln -s "$command" "$agent_dir/commands/"
+done
 omp plugin link .
 ```
 
-These links do not overwrite existing files; merge existing rules, personality instructions, or agent definitions as needed. For named profiles or XDG layouts, set `agent_dir` to the active agent directory. Root plugin linking does **not** discover the nested skills or agents, so keep the explicit links.
+These links do not overwrite existing files. Merge existing rules, personality instructions, or agent definitions as needed. For named profiles or XDG layouts, set `agent_dir` to the active agent directory. Root plugin linking does **not** discover the nested skills, agents, or commands, so keep the explicit links.
+
+Oh My Pi discovers the linked Markdown files as native user commands from the active agent directory's `commands/` folder. Use `/task-start`, `/daily-review`, `/weekly-review`, or `/experiment`. Restart the session after installation. The commands load their skill and templates independently of the working directory. Command names may collide with existing user, project, extension, or plugin commands; inspect and resolve collisions before use. Existing command files are not overwritten.
+
+### Private engineering reflection
+
+Configure the private `obsidian-vault` MCP connection described below for your chosen Obsidian vault. Keep authentication credentials outside this repository. The commands use the available MCP tool schemas and vault-relative paths; MCP need not expose a filesystem path.
+
+If MCP is unavailable, provide an explicitly chosen, already existing private vault and authorize access. The commands ask when the vault or access is unavailable. They never assume a local vault path or create a second vault.
+
+The commands preview proposed notes and request approval before writing by default. Cross-file, significant, ambiguous, or destructive changes require approval even when routine automatic saves are enabled. Journal data stays in the chosen private vault, not this repository. Installation does not touch a real vault, and no reflection runs on a schedule.
 
 Start a new session after installation. Keep rules and skills enabled. The [routing policy](omp/agent/RULES.md) stays loaded: the main agent owns investigation, architecture, contracts, and acceptance; implementation subagents implement all code changes, including trivial fixes. It also defines role precedence, worker ownership, and verification handoffs; full skills load on demand. The custom personality replaces the selected preset unless `personality` is `none`; task subagents do not inherit it. `--config` alone installs neither file.
 
