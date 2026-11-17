@@ -1,4 +1,4 @@
-import { parseStatus, groupsOf, parseDiff, validPath, commitArgs, repositoryKey } from "./model.js";
+import { parseStatus, groupsOf, parseDiff, parsePrevious, validPath, commitArgs, repositoryKey } from "./model.js";
 
 // No shell, external diff driver, textconv, fsmonitor, or optional index writes.
 export const READ = ["--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -32,12 +32,34 @@ export async function readSnapshot(context, exec) {
   return { ...repo, ...after, state: "ready", files, groups: groupsOf(files) };
 }
 
+async function previousCommit(snapshot, exec) {
+  if (!snapshot.head) throw new Error("Create a commit before enabling Amend");
+  const object = checked(await run(exec, snapshot, ["cat-file", "commit", snapshot.head]));
+  const boundary = object.indexOf("\n\n");
+  if (boundary < 0) throw new Error("Git returned an invalid commit");
+  const parent = /^parent ([0-9a-f]+)$/m.exec(object.slice(0, boundary))?.[1];
+  return { message: object.slice(boundary + 2), revisions: parent ? [parent, snapshot.head] : [snapshot.head] };
+}
+
+export async function readPrevious(snapshot, exec) {
+  const commit = await previousCommit(snapshot, exec);
+  const files = parsePrevious(checked(await run(exec, snapshot,
+    ["diff-tree", "--root", "--no-renames", "--no-commit-id", "--name-status", "-z", "-r", ...commit.revisions])));
+  const identity = await readIdentity(snapshot, exec);
+  if (identity.head !== snapshot.head || identity.branch !== snapshot.branch) throw new Error("Repository HEAD changed. Refresh before enabling Amend.");
+  return { head: snapshot.head, message: commit.message, files };
+}
+
 export async function readDiff(snapshot, file, exec) {
-  if (!validPath(file?.path) || !["staged", "unstaged"].includes(file.group)) throw new Error("Select a changed file");
+  if (!validPath(file?.path) || !["staged", "unstaged", "previous"].includes(file.group)) throw new Error("Select a changed file");
   if (file.conflict) return [{ kind: "note", text: "Unresolved conflict. Resolve this file outside Changes, then refresh." }];
   const options = ["--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3"];
   let result;
-  if (file.untracked) {
+  if (file.group === "previous") {
+    const commit = await previousCommit(snapshot, exec);
+    result = await run(exec, snapshot, ["diff-tree", "--root", "--no-commit-id", "-r", "-p", ...options, ...commit.revisions, "--", file.path]);
+    checked(result);
+  } else if (file.untracked) {
     // ls-files only returns checkout-relative entries. Git's no-index diff lstat's
     // the final entry: symlinks are diffed as link text, never opened as targets.
     const listed = checked(await run(exec, snapshot, ["ls-files", "--others", "--exclude-standard", "-z", "--", file.path]));
@@ -55,7 +77,7 @@ export async function readDiff(snapshot, file, exec) {
 // The controller supplies a live context guard. Checks surround every awaited
 // preflight read; the final check and exec invocation share one synchronous turn.
 export async function perform(snapshot, action, exec, isCurrent = () => true) {
-  let attempted = false;
+  let attempted = false, committed = false;
   try {
     const current = () => { if (!isCurrent()) throw new Error("Focus changed. Return to this repository and refresh before trying again."); };
     current();
@@ -65,31 +87,72 @@ export async function perform(snapshot, action, exec, isCurrent = () => true) {
     if (fresh.state !== "ready" || repositoryKey(fresh) !== repositoryKey(snapshot) || fresh.head !== snapshot.head || fresh.branch !== snapshot.branch) {
       throw new Error("Repository HEAD or branch changed. Refresh before trying again.");
     }
-    const conflicts = fresh.files.some((file) => file.conflict);
-    let args;
+    if (fresh.files.some((file) => file.conflict)) throw new Error("Resolve conflicts outside Changes before changing files");
+    const paths = [...new Set(action.paths ?? [])];
+    if (paths.some((path) => !validPath(path))) throw new Error("Select valid file paths");
+    const dirty = fresh.files.filter((file) => paths.includes(file.path));
+    const loaded = new Set(snapshot.files.map((file) => file.path));
+    if (dirty.some((file) => !loaded.has(file.path))) throw new Error("The selected files changed. Refresh before trying again.");
+    let expectedHead = fresh.head;
+    const write = async (args) => {
+      current();
+      const identity = await readIdentity(fresh, exec);
+      current();
+      if (identity.head !== expectedHead || identity.branch !== fresh.branch) throw new Error("Repository HEAD or branch changed. Refresh before trying again.");
+      attempted = true;
+      return checked(await run(exec, fresh, args, false));
+    };
     if (action.type === "commit") {
-      args = commitArgs(action.message);
-      if (conflicts) throw new Error("Resolve conflicts outside Changes before committing");
-      if (!fresh.groups.staged.length) throw new Error("Stage changes before committing");
-    } else if (action.type === "stage" || action.type === "unstage") {
-      const group = action.type === "stage" ? "unstaged" : "staged";
-      const loaded = snapshot.groups[group], available = fresh.groups[group];
-      const paths = action.path === undefined ? loaded.map((file) => file.path) : [action.path];
-      if (!paths.length) throw new Error("There are no files in this group");
-      if (paths.some((path) => !validPath(path) || !loaded.some((file) => file.path === path) || !available.some((file) => file.path === path))) {
-        throw new Error("The selected files changed. Refresh before trying again.");
+      const args = commitArgs(action.message);
+      if (!dirty.length && !action.amend) throw new Error("Select changed files before committing");
+      if (action.amend && !fresh.head) throw new Error("Create a commit before enabling Amend");
+      const untracked = dirty.filter((file) => file.untracked).map((file) => file.path);
+      if (untracked.length) await write(["add", "--intent-to-add", "--", ...untracked]);
+      await write([...args, "--only", ...(action.amend ? ["--amend"] : []), ...(dirty.length ? ["--", ...dirty.map((file) => file.path)] : [])]);
+      committed = true;
+      if (action.push) {
+        current();
+        const identity = await readIdentity(fresh, exec);
+        current();
+        expectedHead = identity.head;
+        if (!expectedHead || identity.branch !== fresh.branch) throw new Error("Repository changed after the local commit");
+        // Push the exact commit just created. Never force or retry a rejected push.
+        await write(["push"]);
       }
-      if (action.type === "stage" && paths.some((path) => fresh.files.some((file) => file.path === path && file.conflict))) {
-        throw new Error("Resolve conflicts outside Changes before staging this group");
+    } else if (action.type === "stash") {
+      if (!dirty.length) throw new Error("Select changed files before stashing");
+      await write(["stash", "push", "--include-untracked", "--", ...dirty.map((file) => file.path)]);
+    } else if (action.type === "rollback") {
+      if (action.confirmed !== true) throw new Error("Confirm rollback before discarding selected changes");
+      if (!dirty.length) throw new Error("Select changed files before rolling back");
+      const selected = dirty.map((file) => file.path);
+      const index = checked(await run(exec, fresh, ["ls-files", "--stage", "-z", "--", ...selected]));
+      current();
+      const tree = fresh.head ? checked(await run(exec, fresh, ["ls-tree", "-z", fresh.head, "--", ...selected])) : "";
+      current();
+      const entries = (text) => text.split("\0").filter(Boolean).map((record) => {
+        const tab = record.indexOf("\t");
+        if (tab < 0) throw new Error("Git returned invalid tracked paths");
+        return { mode: record.slice(0, 6), path: record.slice(tab + 1) };
+      });
+      const indexed = entries(index), baseline = entries(tree);
+      if ([...indexed, ...baseline].some((entry) => entry.mode === "160000")) throw new Error("Submodule rollback is not supported. Restore the submodule outside Changes.");
+      const tracked = baseline.map((entry) => entry.path);
+      const additions = selected.filter((path) => !tracked.includes(path));
+      const indexedAdditions = additions.filter((path) => indexed.some((entry) => entry.path === path));
+      if (tracked.length) await write(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...tracked]);
+      if (indexedAdditions.length) await write(["rm", "--cached", "--force", "-q", "--", ...indexedAdditions]);
+      // Status enumerates individual untracked files. Never clean a containing directory.
+      for (const path of additions) {
+        const others = checked(await run(exec, fresh, ["ls-files", "--others", "-z", "--", path])).split("\0").filter(Boolean);
+        current();
+        if (others.some((entry) => entry !== path)) throw new Error("A selected file is now a directory. Refresh and select individual files before rollback.");
+        if (others.length) await write(["clean", "--force", "-x", "--", path]);
       }
-      args = action.type === "stage" ? ["add", "--", ...paths]
-        : fresh.head ? ["reset", "-q", "HEAD", "--", ...paths] : ["rm", "--cached", "--force", "-q", "--", ...paths];
     } else throw new Error("Unknown Changes action");
-    current(); attempted = true;
-    const result = await run(exec, snapshot, args, false);
-    checked(result);
-    return { ok: true, attempted };
+    return { ok: true, attempted, committed };
   } catch (error) {
-    return { ok: false, attempted, message: String(error?.message ?? error) };
+    const detail = String(error?.message ?? error);
+    return { ok: false, attempted, committed, message: committed ? `Local commit succeeded, but push did not complete: ${detail}` : detail };
   }
 }

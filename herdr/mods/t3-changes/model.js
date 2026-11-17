@@ -39,6 +39,27 @@ export function groupsOf(files) {
   return { staged, unstaged };
 }
 
+export function unifiedFiles(snapshot, previous = []) {
+  const files = new Map();
+  for (const file of [...(snapshot?.groups.unstaged ?? []), ...(snapshot?.groups.staged ?? []), ...previous]) {
+    if (!files.has(file.path)) files.set(file.path, file);
+  }
+  return [...files.values()];
+}
+
+export function parsePrevious(text) {
+  if (!text) return [];
+  const records = text.split("\0");
+  if (records.pop() !== "" || records.length % 2) throw new Error("Git returned incomplete previous-commit paths");
+  const files = [];
+  for (let i = 0; i < records.length; i += 2) {
+    const status = records[i], path = records[i + 1];
+    if (!/^[AMDT]$/.test(status) || !validPath(path)) throw new Error("Git returned unsupported previous-commit paths");
+    files.push({ path, status, xy: "  ", group: "previous", conflict: false, untracked: false });
+  }
+  return files;
+}
+
 export function fileTree(files) {
   const root = { children: new Map() };
   for (const file of files) {
@@ -51,8 +72,10 @@ export function fileTree(files) {
       if (i === parts.length - 1) node.file = file;
     }
   }
-  const ordered = (node) => [...node.children.values()].sort((a, b) => Number(Boolean(a.file)) - Number(Boolean(b.file)) || a.name.localeCompare(b.name))
-    .map((child) => child.file ? { name: child.name, path: child.path, file: child.file } : { name: child.name, path: child.path, children: ordered(child) });
+  const ordered = (node) => [...node.children.values()].flatMap((child) => [
+    ...(child.children.size ? [{ name: child.name, path: child.path, children: ordered(child) }] : []),
+    ...(child.file ? [{ name: child.name, path: child.path, file: child.file }] : []),
+  ]).sort((a, b) => Number(Boolean(a.file)) - Number(Boolean(b.file)) || a.name.localeCompare(b.name));
   return ordered(root);
 }
 

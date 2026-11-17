@@ -10,6 +10,11 @@ export class ChangesController {
   busy: boolean;
   closed: boolean;
   context?: string;
+  checked: Set<string>;
+  amend: boolean;
+  files(): ChangeFile[];
+  toggleFiles(paths: string[]): void;
+  setAmend(enabled: boolean): Promise<void>;
   transition(context?: Location): boolean;
   draft(snapshot?: Snapshot | null): Draft;
   setDraft(message: string): void;

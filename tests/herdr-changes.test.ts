@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, symlinkSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseStatus, groupsOf, fileTree, treeRows, parseDiff, commitArgs, displayPath } from "../herdr/mods/t3-changes/model.js";
+import { parseStatus, groupsOf, fileTree, treeRows, parseDiff, commitArgs, displayPath, parsePrevious, unifiedFiles } from "../herdr/mods/t3-changes/model.js";
 import { readSnapshot, readDiff, perform, type Exec } from "../herdr/mods/t3-changes/git.js";
 import { ChangesController } from "../herdr/mods/t3-changes/controller.js";
 import { resolveContext } from "../herdr/mods/t3-changes/context.js";
@@ -44,6 +44,26 @@ describe("Changes calculations", () => {
     expect(() => parseStatus(" M incomplete")).toThrow();
     expect(() => parseStatus(" M ../outside\0")).toThrow();
   });
+  test("file-to-directory changes preserve both nodes and every changed file", () => {
+    const files = unifiedFiles({ groups: groupsOf(parseStatus(" D a\0?? a/b\0")) });
+    const tree = fileTree(files), rows = treeRows(tree, new Set(), "changes");
+    expect(tree.map((node) => [node.path, Boolean(node.file)])).toEqual([["a", false], ["a", true]]);
+    expect(rows.filter((row) => row.file).map((row) => row.path).sort()).toEqual(["a", "a/b"]);
+    expect(rows.map((row) => [row.path, row.depth])).toEqual([["a", 0], ["a/b", 1], ["a", 0]]);
+    const collapsed = treeRows(tree, new Set(["changes:a"]), "changes");
+    expect(collapsed.map((row) => [row.path, Boolean(row.file)])).toEqual([["a", false], ["a", true]]);
+  });
+
+  test("amend previous-only paths cannot hide changed descendants", () => {
+    const groups = groupsOf(parseStatus("?? a/b\0"));
+    const previous = parsePrevious("D\0a\0");
+    for (const files of [unifiedFiles({ groups }, previous), [...previous, ...groups.unstaged]]) {
+      const tree = fileTree(files), rows = treeRows(tree, new Set(), "changes");
+      expect(tree.map((node) => [node.path, Boolean(node.file)])).toEqual([["a", false], ["a", true]]);
+      expect(rows.filter((row) => row.file).map((row) => row.path).sort()).toEqual(["a", "a/b"]);
+      expect(tree[0].children?.map((node) => node.path)).toEqual(["a/b"]);
+    }
+  });
   test("unified diffs preserve both gutters and no-final-newline notes", () => {
     const rows = parseDiff("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -7,2 +7,2 @@\n same\n-old\n+new\n\\ No newline at end of file\n");
     expect(rows).toEqual([{ kind: "hunk", text: "@@ -7,2 +7,2 @@" }, { kind: " ", text: "same", old: 7, next: 7 },
@@ -62,48 +82,47 @@ describe("Changes calculations", () => {
 });
 
 describe("Changes real Git boundary", () => {
-  test("loads both groups and stages literal special filenames only", async () => {
+  test("loads both groups and commits literal special filenames only", async () => {
     const context = repo(), root = context.cwd, path = "-odd [x]*\nname.txt";
     writeFileSync(join(root, "tracked.txt"), "index\n"); must(root, "add", "tracked.txt");
     writeFileSync(join(root, "tracked.txt"), "worktree\n");
     writeFileSync(join(root, path), "literal\n"); writeFileSync(join(root, "unrelated.txt"), "leave untracked\n");
-    let snapshot = await readSnapshot(context, exec);
+    const snapshot = await readSnapshot(context, exec);
     expect(snapshot.groups.staged[0].path).toBe("tracked.txt");
     expect(snapshot.groups.unstaged.find((f) => f.path === "tracked.txt")).toBeDefined();
     expect((await readDiff(snapshot, snapshot.groups.staged[0], exec)).some((r) => r.kind === "+" && r.text === "index")).toBe(true);
     const untracked = snapshot.groups.unstaged.find((file) => file.path === path);
     if (!untracked) throw new Error("Expected literal untracked path");
     expect((await readDiff(snapshot, untracked, exec)).some((r) => r.text === "literal")).toBe(true);
-    expect((await perform(snapshot, { type: "stage", path }, exec)).ok).toBe(true);
-    snapshot = await readSnapshot(context, exec);
-    expect(snapshot.groups.staged.some((f) => f.path === path)).toBe(true);
-    expect(snapshot.groups.unstaged.some((f) => f.path === "unrelated.txt")).toBe(true);
-    expect((await perform(snapshot, { type: "unstage", path }, exec)).ok).toBe(true);
-    expect(readFileSync(join(root, path), "utf8")).toBe("literal\n");
+    expect((await perform(snapshot, { type: "commit", paths: [path], message: "Literal" }, exec)).ok).toBe(true);
+    expect(must(root, "show", `HEAD:${path}`)).toBe("literal\n");
+    expect(must(root, "show", "HEAD:tracked.txt")).toBe("base\n");
+    expect((await readSnapshot(context, exec)).groups.unstaged.some((f) => f.path === "unrelated.txt")).toBe(true);
   });
 
-  test("unstages an unborn index without losing newer worktree content", async () => {
+  test("rolls back selected additions safely in an unborn index", async () => {
     const context = repo(false), root = context.cwd;
     writeFileSync(join(root, "new.txt"), "index\n"); must(root, "add", "new.txt");
     writeFileSync(join(root, "new.txt"), "newer work\n");
+    writeFileSync(join(root, "keep.txt"), "keep\n"); must(root, "add", "keep.txt");
     const snapshot = await readSnapshot(context, exec);
-    expect(snapshot.head).toBeNull(); expect(snapshot.groups.staged).toHaveLength(1);
-    expect((await perform(snapshot, { type: "unstage" }, exec)).ok).toBe(true);
-    expect((await readSnapshot(context, exec)).groups.staged).toHaveLength(0);
-    expect(readFileSync(join(root, "new.txt"), "utf8")).toBe("newer work\n");
+    expect(snapshot.head).toBeNull();
+    expect((await perform(snapshot, { type: "rollback", paths: ["new.txt"], confirmed: true }, exec)).ok).toBe(true);
+    expect((await readSnapshot(context, exec)).groups.staged.map((file) => file.path)).toEqual(["keep.txt"]);
+    expect(readFileSync(join(root, "keep.txt"), "utf8")).toBe("keep\n");
   });
 
-  test("commit preserves the exact multiline message and leaves unstaged content outside HEAD", async () => {
+  test("commit preserves the exact multiline message and includes the full selected workingtree file", async () => {
     const context = repo(), root = context.cwd;
     writeFileSync(join(root, "tracked.txt"), "staged only\n"); must(root, "add", "tracked.txt");
     writeFileSync(join(root, "tracked.txt"), "not committed\n");
     const snapshot = await readSnapshot(context, exec);
     const message = "\n  Subject with spaces  \n\n# Keep this line\nFirst detail\nSecond detail\t \n\n";
-    expect((await perform(snapshot, { type: "commit", message }, exec)).ok).toBe(true);
-    expect(must(root, "show", "HEAD:tracked.txt")).toBe("staged only\n");
+    expect((await perform(snapshot, { type: "commit", message, paths: ["tracked.txt"] }, exec)).ok).toBe(true);
+    expect(must(root, "show", "HEAD:tracked.txt")).toBe("not committed\n");
     const object = must(root, "cat-file", "commit", "HEAD");
     expect(object.slice(object.indexOf("\n\n") + 2)).toBe(message);
-    expect((await readSnapshot(context, exec)).groups.unstaged).toHaveLength(1);
+    expect((await readSnapshot(context, exec)).files).toHaveLength(0);
   });
 
   test("preflight rejects branch changes and focus changes before Git writes", async () => {
@@ -111,24 +130,27 @@ describe("Changes real Git boundary", () => {
     writeFileSync(join(root, "tracked.txt"), "changed\n");
     const snapshot = await readSnapshot(context, exec);
     must(root, "switch", "-c", "other");
-    expect((await perform(snapshot, { type: "stage" }, exec)).message).toContain("HEAD or branch changed");
+    expect((await perform(snapshot, { type: "commit", paths: ["tracked.txt"], message: "No" }, exec)).ok).toBe(false);
     expect((await readSnapshot(context, exec)).groups.staged).toHaveLength(0);
     const fresh = await readSnapshot(context, exec);
     let focused = true;
     const switchedExec: Exec = async (program, args, options) => { const result = await exec(program, args, options); focused = false; return result; };
-    expect((await perform(fresh, { type: "stage" }, switchedExec, () => focused)).ok).toBe(false);
+    expect((await perform(fresh, { type: "commit", paths: ["tracked.txt"], message: "No" }, switchedExec, () => focused)).ok).toBe(false);
     expect((await readSnapshot(context, exec)).groups.staged).toHaveLength(0);
   });
 
-  test("conflicts remain visible and block staging and commit", async () => {
+  test("conflicts remain visible and block commit, stash, and rollback", async () => {
     const context = repo(), root = context.cwd;
     must(root, "switch", "-c", "side"); writeFileSync(join(root, "tracked.txt"), "side\n"); must(root, "commit", "-am", "Side");
     must(root, "switch", "main"); writeFileSync(join(root, "tracked.txt"), "main\n"); must(root, "commit", "-am", "Main");
     expect(git(root, "merge", "side").code).not.toBe(0);
     const snapshot = await readSnapshot(context, exec);
     expect(snapshot.groups.unstaged[0].status).toBe("U");
-    expect((await perform(snapshot, { type: "stage" }, exec)).ok).toBe(false);
-    expect((await perform(snapshot, { type: "commit", message: "No" }, exec)).message).toContain("conflicts");
+    for (const action of [
+      { type: "stash" as const, paths: ["tracked.txt"] },
+      { type: "rollback" as const, paths: ["tracked.txt"], confirmed: true },
+      { type: "commit" as const, paths: ["tracked.txt"], message: "No" },
+    ]) expect((await perform(snapshot, action, exec)).ok).toBe(false);
   });
 
   test("untracked symlinks never expose outside contents; empty, binary, and mode diffs are honest", async () => {
@@ -158,9 +180,10 @@ describe("Changes real Git boundary", () => {
     await controller.refresh(); expect(controller.diff?.some((r) => r.text === "second edit")).toBe(true);
     context = second; await controller.refresh(); expect(controller.draft().message).toBe("");
     context = first; await controller.refresh(); expect(controller.draft().message).toBe(message);
+    controller.toggleFiles(["tracked.txt"]);
     await controller.mutate({ type: "commit" }); expect(controller.draft().message).toBe(message);
-    expect(controller.error).toContain("Stage changes");
-    await controller.mutate({ type: "stage" }); await controller.mutate({ type: "commit" });
+    expect(controller.error).not.toBeNull();
+    controller.toggleFiles(["tracked.txt"]); await controller.mutate({ type: "commit" });
     expect(controller.draft().message).toBe(""); controller.close();
   });
 
@@ -348,20 +371,21 @@ describe("Changes real Git boundary", () => {
     expect(closed.snapshot).toBeNull();
   });
 
-  test("no-folder, non-repository, clean, stage-all, and unstage-all states use real Git", async () => {
+  test("no-folder, non-repository, clean, and select-all states use real Git", async () => {
     expect((await readSnapshot({}, exec)).state).toBe("nofolder");
     const outside = mkdtempSync(join(tmpdir(), "herdr-no-repo-")); roots.push(outside);
     expect((await readSnapshot({ cwd: outside }, exec)).state).toBe("norepo");
     const context = repo();
     expect((await readSnapshot(context, exec)).files).toHaveLength(0);
     rmSync(join(context.cwd, "tracked.txt")); writeFileSync(join(context.cwd, "new.txt"), "new\n");
-    let snapshot = await readSnapshot(context, exec);
-    expect((await perform(snapshot, { type: "stage" }, exec)).ok).toBe(true);
-    snapshot = await readSnapshot(context, exec);
-    expect(snapshot.groups.staged.map((file) => file.status).sort()).toEqual(["A", "D"]);
-    expect((await perform(snapshot, { type: "unstage" }, exec)).ok).toBe(true);
-    snapshot = await readSnapshot(context, exec);
-    expect(snapshot.groups.staged).toHaveLength(0); expect(snapshot.groups.unstaged).toHaveLength(2);
+    const controller = new ChangesController({ exec, location: () => context });
+    await controller.refresh();
+    expect(controller.checked.size).toBe(2);
+    const paths = controller.files().map((file) => file.path);
+    controller.toggleFiles(paths); expect(controller.checked.size).toBe(0);
+    controller.toggleFiles(paths); expect(controller.checked.size).toBe(2);
+    controller.setDraft("Selected changes"); await controller.mutate({ type: "commit" });
+    expect(controller.snapshot?.files).toHaveLength(0); controller.close();
   });
 });
 
@@ -449,7 +473,7 @@ describe("Changes live space context", () => {
     const old = controller.selected;
     context = { ...base, space: "b", on: "machine-b" };
     const before = calls.length;
-    await controller.select(old); await controller.mutate({ type: "stage" }); controller.setDraft("Stale input");
+    await controller.select(old); await controller.mutate({ type: "stash" }); controller.toggleFiles(["tracked.txt"]); controller.setDraft("Stale input");
     expect(calls).toHaveLength(before);
     await controller.refresh(); expect(controller.draft().message).toBe("");
     expect(controller.snapshot?.on).toBe("machine-b"); controller.setDraft("Machine B");
@@ -523,7 +547,8 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
     }
     mock.module("gpui-kit", () => ({ View: class {}, div: element, svg: element, image: element }));
     mock.module("gpui-base", () => ({
-      h_flex: element, v_flex: element, TextareaState: Input, Textarea: { new: element },
+      h_flex: element, v_flex: element, Checkbox: { new: element }, TextareaState: Input, Textarea: { new: element },
+      VirtualListScrollHandle: { new: () => ({ release() {}, scroll_to_item() {} }) },
       Scrollbar: { vertical: element, horizontal: element },
       v_virtual_list: (_id, count, _height, _key, render) => { render({ start: 0, end: count }); return element(); },
     }));
@@ -583,8 +608,9 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
     for (let i = 0; i < 12; i++) { render(); await tick(); }
     assert.equal(queries, stableQueries);
     await view.controller.refresh(); assert(queries > stableQueries, "manual Refresh must read Git");
-    await view.controller.mutate({ type: "stage" }); assert.equal(view.controller.snapshot.groups.staged.length, 2);
-    await view.controller.mutate({ type: "unstage" }); assert.equal(view.controller.snapshot.groups.staged.length, 0);
+    const paths = view.controller.files().map(file => file.path);
+    view.controller.toggleFiles(paths); assert.equal(view.controller.checked.size, 0);
+    view.controller.toggleFiles(paths); assert.equal(view.controller.checked.size, 2);
     choose("b"); render();
     const beforeClose = queries; view.close(); await flush(); await tick();
     assert.equal(queries, beforeClose, "closed view must cancel pending context work");

@@ -1,24 +1,32 @@
-import { View, div, svg } from "gpui-kit";
-import { h_flex, v_flex, Textarea, TextareaState, Scrollbar, v_virtual_list } from "gpui-base";
+import { View, div } from "gpui-kit";
+import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
 import { ChangesController } from "./controller.js";
 import { displayPath, repositoryKey, selectionKey, fileTree, treeRows } from "./model.js";
 import { TREE_ROW, treeRow, statusBadge } from "./tree-row.js";
 import { resolveContext } from "./context.js";
 
-const UI = { sidebar: 264, narrow: 560, header: 76, diffRow: 24, diffScrollbar: 16, text: 12, code: 12, radius: 5, commitRadius: 8, commitHeight: 36 };
+const UI = { narrow: 900, header: 36, diffRow: 24, diffScrollbar: 16, text: 12, code: 12, radius: 5, commitRadius: 8, commitHeight: 30 };
 const location = () => resolveContext(spaces(), panes(), focused());
 
 export default class Changes extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
-    this.handles = Object.fromEntries(["refresh", "unstaged", "staged", "stage-all", "unstage-all", "commit", "tree"].map((id) => [id, cx.focus_handle()]));
-    this.collapsed = new Set(); this.folded = new Set(); this.width = 900; this.height = 600; this.treeTop = 0; this.treeHeight = 240;
+    this.handles = Object.fromEntries(["refresh", "stash", "rollback", "confirm-rollback", "cancel-rollback", "all", "amend", "commit", "commit-push", "tree"].map((id) => [id, cx.focus_handle()]));
+    this.collapsed = new Set(); this.width = 900; this.height = 600; this.treeAt = 0;
+    this.treeScroll = VirtualListScrollHandle.new();
     this.id = `t3-changes-${Math.random().toString(36).slice(2)}`;
-    this.messageState = TextareaState.new({ placeholder: "Commit message", value: "", rows: 1 });
-    this.messageState.set_auto_grow(1, 5);
+    this.messageState = TextareaState.new({ placeholder: "Commit message", value: "", rows: 5 });
     this.messageState.set_soft_wrap(true);
-    this.controller = new ChangesController({ exec, location, changed: () => { this.syncMessage(); cx.notify(); },
+    this.controller = new ChangesController({ exec, location, changed: () => {
+      this.syncMessage();
+      for (const row of treeRows(fileTree(this.controller.files()), new Set(), "changes")) {
+        const id = row.file ? `check-${row.path}` : `folder-${row.path}`;
+        if (!this.handles[id]) this.handles[id] = cx.focus_handle();
+      }
+      if (this.rollbackRequest && this.rollbackRequest.key !== this.confirmationKey()) this.rollbackRequest = null;
+      cx.notify();
+    },
       publish: () => setShared("git-graph.changed", Date.now()) });
     this.messageState.on("change", (_e, cx) => { if (!this.syncing) this.controller.setDraft(this.messageState.value()); cx.notify(); });
     this.messageState.on("focus", (_e, cx) => { this.messageFocused = true; cx.notify(); });
@@ -32,12 +40,27 @@ export default class Changes extends View {
     });
   }
 
-  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.messageState.release(); }
+  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.treeScroll.release(); this.messageState.release(); }
   start(cx, action) { cx.spawn(async () => { await action(); }); }
-  mutate(cx, action) { this.start(cx, () => this.controller.mutate(action)); }
+  mutate(cx, action) { this.rollbackRequest = null; this.start(cx, () => this.controller.mutate(action)); }
+
+  confirmationKey() {
+    const c = this.controller;
+    return JSON.stringify([c.context, c.snapshot?.head, [...c.checked].sort()]);
+  }
+
+  toggleFiles(paths) { this.rollbackRequest = null; this.controller.toggleFiles(paths); }
+
+  confirmRollback(cx) {
+    const request = this.rollbackRequest;
+    this.rollbackRequest = null;
+    if (!request || request.key !== this.confirmationKey()) return;
+    this.start(cx, () => request.key === this.confirmationKey() ? this.controller.mutate({ type: "rollback", confirmed: true }) : Promise.resolve());
+  }
 
   requestContext(cx) {
     if (!this.controller.transition()) return false;
+    this.rollbackRequest = null;
     if (!this.contextWork) this.contextWork = cx.timer.after(0, (cx) => {
       this.contextWork = null;
       if (!this.controller.closed) this.start(cx, () => this.controller.refresh());
@@ -48,7 +71,7 @@ export default class Changes extends View {
   control(t, id, label, content, action, { disabled = false, primary = false } = {}) {
     const handle = this.handles[id];
     let el = h_flex().id(`${this.id}-${id}`).h(28).px(6).gap(4).items_center().justify_center().flex_none().rounded(UI.radius)
-      .role("button").accessibility_label(label).text_size(11).font_medium()
+      .role("button").accessibility_label(label).disabled(disabled).text_size(11).font_medium()
       .text_color(primary ? t.solid_foreground : t.accent).when(primary, (e) => e.bg(t.solid))
       .when(disabled, (e) => e.opacity(0.5)).when(!disabled, (e) => e.cursor_pointer().hover((s) => primary ? s.opacity(0.9) : s.bg(t.hover)))
       .when(!disabled, (e) => e.on_click((_e, cx) => { cx.stop_propagation(); action(cx); cx.notify(); })).child(content);
@@ -64,111 +87,139 @@ export default class Changes extends View {
     this.syncing = true;
     try {
       if (this.messageState.value() !== draft.message) this.messageState.set_value(draft.message);
-      if (key !== this.inputRepository) { this.inputRepository = key; this.treeTop = 0; this.treeAt = 0; }
+      if (key !== this.inputRepository) { this.inputRepository = key; this.treeAt = 0; this.collapsed.clear(); }
     } finally { this.syncing = false; }
   }
 
   rows() {
-    const groups = this.controller.snapshot?.groups ?? { unstaged: [], staged: [] };
-    return ["unstaged", "staged"].flatMap((group) => [{ kind: "group", group }, ...(!this.folded.has(group)
-      ? treeRows(fileTree(groups[group]), this.collapsed, group).map((row) => ({ ...row, group, kind: row.file ? "file" : "folder" })) : [])]);
+    return treeRows(fileTree(this.controller.files()), this.collapsed, "changes");
   }
 
   activateRow(row, cx) {
-    if (row.kind === "group") this.toggle(this.folded, row.group);
-    else if (row.kind === "folder") this.toggle(this.collapsed, `${row.group}:${row.path}`);
-    else this.start(cx, () => this.controller.select(row.file));
+    if (!row.file) this.toggle(this.collapsed, `changes:${row.path}`);
+    else if (!this.controller.busy && !this.controller.loading) this.start(cx, () => this.controller.select(row.file));
     cx.notify();
   }
   toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
 
+  checkbox(t, id, label, checked, action, { disabled = false, partial = false, text } = {}) {
+    const handle = this.handles[id];
+    return Checkbox.new(`${this.id}-${id}`).checked(checked).disabled(disabled).accessibility_label(label)
+      .when(Boolean(handle), (el) => el.track_focus(handle)).tab_index(disabled ? -1 : 0)
+      .h(TREE_ROW).flex_none().px(3).flex().items_center().gap(6).rounded(UI.radius)
+      .when(disabled, (el) => el.opacity(0.5))
+      .when(!disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+      .border(2).border_color(handle?.is_focused() && !disabled ? t.accent : "#00000000")
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_change((_checked, cx) => { cx.stop_propagation(); if (!disabled) action(cx); cx.notify(); })
+      .child(div().size(14).flex_none().flex().items_center().justify_center().rounded(2).border_1()
+        .border_color(checked || partial ? t.accent : t.muted).bg(t.input).text_color(t.foreground).text_size(11)
+        .child(checked ? "✓" : partial ? "−" : ""))
+      .when(Boolean(text), (el) => el.child(text));
+  }
+
   tree(t) {
-    const rows = this.rows(), c = this.controller, groups = c.snapshot?.groups ?? { unstaged: [], staged: [] };
+    const rows = this.rows(), c = this.controller, files = c.files(), locked = c.busy || c.loading;
     const treeTheme = { ...t, dim: t.muted, ring: t.accent };
-    const total = rows.length * TREE_ROW, max = Math.max(0, total - this.treeHeight);
-    this.treeTop = Math.max(0, Math.min(this.treeTop, max));
-    const first = Math.floor(this.treeTop / TREE_ROW), end = Math.min(rows.length, Math.ceil((this.treeTop + this.treeHeight) / TREE_ROW) + 1);
-    const at = Math.max(0, Math.min(this.treeAt ?? 0, rows.length - 1));
+    const at = Math.max(0, Math.min(this.treeAt, rows.length - 1));
+    const width = rows.reduce((max, row) => Math.max(max, 144 + row.depth * 27.2 + displayPath(row.name).length * UI.text), 240);
+    const pathsOf = (row) => row.file ? [row.path] : files.filter((file) => file.path.startsWith(`${row.path}/`)).map((file) => file.path);
     const draw = (row, i) => {
-      let el;
-      if (row.kind === "group") {
-        const title = row.group === "staged" ? "Staged" : "Unstaged", files = groups[row.group];
-        const toggle = this.control(t, row.group, `${this.folded.has(row.group) ? "Expand" : "Collapse"} ${title}`,
-          h_flex().items_center().gap(4.8)
-            .child(div().size(16).flex_none().flex().items_center().justify_center()
-              .child(svg(`mods/t3-files/icons/chevron-${this.folded.has(row.group) ? "right" : "down"}.svg`).size(12).text_color(t.muted)))
-            .child(title), () => this.toggle(this.folded, row.group)).h(TREE_ROW);
-        el = h_flex().items_center().px(8).gap(4).when(row.group === "staged", (e) => e.border_t(1).border_color(t.border))
-          .child(toggle.text_color(t.foreground)).child(div().flex_1())
-          .child(this.control(t, row.group === "staged" ? "unstage-all" : "stage-all", row.group === "staged" ? "Unstage all files" : "Stage all files",
-            row.group === "staged" ? "Unstage all" : "Stage all", (cx) => this.mutate(cx, { type: row.group === "staged" ? "unstage" : "stage" }),
-            { disabled: c.busy || c.loading || !files.length || row.group === "unstaged" && files.some((file) => file.conflict) }).h(TREE_ROW))
-          .child(div().w(18).text_right().text_color(t.muted).text_size(10).child(String(files.length)));
-      } else {
-        const selected = Boolean(row.file && selectionKey(c.selected) === selectionKey(row.file));
-        const open = !this.collapsed.has(`${row.group}:${row.path}`);
-        const action = row.file ? this.control(t, `file-action-${i}`,
-          `${row.group === "staged" ? "Unstage" : "Stage"} ${displayPath(row.path)} (Space on selected file)`, row.group === "staged" ? "−" : "+",
-          (cx) => this.mutate(cx, { type: row.group === "staged" ? "unstage" : "stage", path: row.path }),
-          { disabled: c.busy || c.loading || row.file.conflict })
-          .h(20).w(20).px(0).on_mouse_down("left", (_e, cx) => cx.stop_propagation()) : null;
-        const badge = row.file ? statusBadge(row.file.status)
-          .when(row.file.conflict, (e) => e.text_color(t.ansi1).bg(t.ansi1 + "1a")) : div().size(16).flex_none();
-        el = treeRow(treeTheme, "mods/t3-files",
-          { name: displayPath(row.name), path: row.path, depth: row.depth, dir: !row.file, open }, `${this.id}-row-${i}`,
-          { selected, focused: this.handles.tree.is_focused() && i === at,
-            trailing: h_flex().items_center().gap(4.8).flex_none()
-              .child(badge).child(div().size(20).flex_none().flex().items_center().justify_center().when(Boolean(action), (e) => e.child(action))) })
-          .role("button").accessibility_label(row.file ? `${row.group}: ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
-          .cursor_pointer().on_click((_e, cx) => { this.treeAt = i; this.activateRow(row, cx); });
-      }
-      return el.absolute().left(8).right(8).top(i * TREE_ROW - this.treeTop).h(TREE_ROW).text_size(UI.text)
-        .when(row.kind === "group" && this.handles.tree.is_focused() && i === at, (e) => e.rounded(UI.radius).border(2).border_color(t.accent));
+      const paths = pathsOf(row), count = paths.filter((path) => c.checked.has(path)).length;
+      const open = !this.collapsed.has(`changes:${row.path}`);
+      return treeRow(treeTheme, "mods/t3-files",
+        { name: displayPath(row.name), path: row.path, depth: row.depth, dir: !row.file, open }, `${this.id}-row-${row.file ? "file" : "folder"}-${row.path}`,
+        { truncate: false, selected: Boolean(row.file && selectionKey(c.selected) === selectionKey(row.file)),
+          focused: this.handles.tree.is_focused() && i === at,
+          leading: this.checkbox(t, row.file ? `check-${row.path}` : "folder-" + row.path,
+            `${count && count !== paths.length ? "Partially selected. " : ""}Include ${displayPath(row.path)}`, count === paths.length,
+            () => this.toggleFiles(paths), { disabled: locked, partial: count > 0 && count < paths.length }),
+          trailing: row.file ? statusBadge(row.file.status).when(row.file.conflict, (el) => el.text_color(t.ansi1)) : null })
+        .role("button").accessibility_label(row.file ? `Preview ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
+        .cursor_pointer().on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = i; this.activateRow(row, cx); });
     };
-    return div().id(`${this.id}-tree`).relative().flex_1().min_h(56).overflow_hidden().track_focus(this.handles.tree).tab_index(0)
-      .role("group").accessibility_label("Changed files. Arrow keys navigate, Enter selects or expands, Space stages or unstages a file.")
-      .on_mouse_down("left", () => this.handles.tree.focus())
-      .on_size_change((size, cx) => { const height = size.height / (Number(settings()?.zoom) || 1); if (height !== this.treeHeight) { this.treeHeight = height; cx.notify(); } })
-      .on_scroll_wheel((e, cx) => { cx.stop_propagation(); this.treeTop = Math.max(0, Math.min(max, this.treeTop - e.delta.y / (Number(settings()?.zoom) || 1))); cx.notify(); })
-      .on_key_down((e, cx) => {
-        if (!this.handles.tree.is_focused()) return;
-        const row = rows[at]; if (!row) return;
-        if (["up", "down", "home", "end"].includes(e.key)) {
-          this.treeAt = e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, at + (e.key === "down" ? 1 : -1)));
-          this.treeTop = Math.max(0, Math.min(max, this.treeTop, this.treeAt * TREE_ROW), (this.treeAt + 1) * TREE_ROW - this.treeHeight);
-        } else if (e.key === "enter") this.activateRow(row, cx);
-        else if (e.key === "space" && row.file && !row.file.conflict) this.mutate(cx, { type: row.group === "staged" ? "unstage" : "stage", path: row.path });
-        else if (["left", "right"].includes(e.key) && !row.file) {
-          const set = row.kind === "group" ? this.folded : this.collapsed, key = row.kind === "group" ? row.group : `${row.group}:${row.path}`;
-          if (e.key === "left") set.add(key); else set.delete(key);
-        } else return;
-        cx.stop_propagation(); cx.notify();
-      }).children(rows.slice(first, end).map((row, i) => draw(row, first + i)));
+    return v_flex().w_full().flex_1().min_h(0).min_w(0)
+      .child(h_flex().h(28).flex_none().px(8).items_center().gap(6)
+        .child(this.checkbox(t, "all", "Include all changed files", files.length > 0 && files.every((file) => c.checked.has(file.path)),
+          () => this.toggleFiles(files.map((file) => file.path)), { disabled: locked || !files.length,
+            partial: c.checked.size > 0 && c.checked.size < files.length, text: "Changes" }))
+        .child(div().text_color(t.muted).child(`${files.length} files · ${c.checked.size} selected`)))
+      .child(div().flex_1().min_h(0).min_w(0).relative()
+        .child(div().id(`${this.id}-tree-x`).size_full().min_w(0).overflow_x_scroll()
+          .child(div().w_full().min_w(width).h_full().track_focus(this.handles.tree).tab_index(0)
+            .role("group").accessibility_label("Changed files. Arrows navigate, Enter previews or expands, Space toggles inclusion.")
+            .on_key_down((e, cx) => {
+              if (!this.handles.tree.is_focused()) return;
+              const row = rows[at]; if (!row) return;
+              if (["up", "down", "home", "end"].includes(e.key)) {
+                this.treeAt = e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, at + (e.key === "down" ? 1 : -1)));
+                this.treeScroll.scroll_to_item(this.treeAt);
+              } else if (e.key === "enter") this.activateRow(row, cx);
+              else if (e.key === "space" && !locked) this.toggleFiles(pathsOf(row));
+              else if (["left", "right"].includes(e.key) && !row.file) {
+                if (e.key === "left") this.collapsed.add(`changes:${row.path}`); else this.collapsed.delete(`changes:${row.path}`);
+              } else return;
+              cx.stop_propagation(); cx.notify();
+            })
+            .on_scroll_wheel((_e, cx) => cx.stop_propagation())
+            .child(v_virtual_list(`${this.id}-tree-y`, rows.length, TREE_ROW, (i) => `${rows[i].file ? "file" : "folder"}:${rows[i].path}`,
+              (range) => rows.slice(range.start, range.end).map((row, i) => draw(row, range.start + i)))
+              .track_scroll(this.treeScroll).size_full())
+            .when(!rows.length, (el) => el.child(div().absolute().inset_0().p(12).text_color(t.muted).child(this.emptyMessage())))))
+        .child(Scrollbar.vertical(`${this.id}-tree-y`).mode("always").viewport_from_layout().absolute().inset_0()))
+      .child(div().w_full().min_w(0).h(UI.diffScrollbar).flex_none().relative()
+        .child(Scrollbar.horizontal(`${this.id}-tree-x`).mode("always").viewport_from_layout().absolute().inset_0()));
+  }
+
+  emptyMessage() {
+    const c = this.controller, snapshot = c.snapshot;
+    return c.loading ? "Loading changes…" : !snapshot || snapshot.state === "nofolder"
+      ? "Focus a terminal in a repository, then refresh." : snapshot.state === "norepo"
+      ? "This folder isn't a Git repository." : "Working tree clean";
   }
 
   commitFooter(t) {
-    const c = this.controller, ready = c.snapshot?.state === "ready", staged = c.snapshot?.groups.staged.length ?? 0;
+    const c = this.controller, ready = c.snapshot?.state === "ready", locked = c.busy || c.loading;
     const conflict = c.snapshot?.files.some((file) => file.conflict), message = c.draft().message;
-    return v_flex().w_full().flex_none().p(12).gap(8).border_t(1).border_color(t.border).text_size(UI.text)
-      .child(h_flex().w_full().min_w(0).items_start().gap(8)
-        .child(Textarea.new(this.messageState).flex_1().min_w(0).min_h(UI.commitHeight).px(10).py(6)
-          .rounded(UI.commitRadius).bg(t.input).text_size(UI.text).line_height("20px").text_color(t.foreground)
-          .border(2).border_color(this.messageFocused ? t.accent : t.border).accessibility_label("Commit message"))
-        .child(this.control(t, "commit", "Commit staged changes only", c.busy ? "Working…" : "Commit", (cx) => this.mutate(cx, { type: "commit" }),
-          { primary: true, disabled: !ready || c.busy || c.loading || conflict || !staged || !message.trim() || message.includes("\0") })
-          .h(UI.commitHeight).px(14).rounded(UI.commitRadius)))
-      .when(Boolean(conflict), (e) => e.child(div().text_color(t.ansi1).child("Resolve conflicts outside Changes before staging or committing.")))
-      .when(Boolean(ready && !staged), (e) => e.child(div().text_color(t.muted).text_size(10).child("Stage files to include them in the commit.")));
+    const disabled = !ready || locked || conflict || (!c.checked.size && !c.amend) || !message.trim() || message.includes("\0");
+    const height = Math.min(Math.max(210, this.height * 0.37), Math.max(130, this.height - 110));
+    return v_flex().w_full().h(height).min_h(0).flex_none().p(10).gap(6).border_t(1).border_color(t.border).text_size(UI.text)
+      .child(h_flex().h(TREE_ROW).flex_none().items_center().gap(8)
+        .child(this.checkbox(t, "amend", "Amend previous commit", c.amend, (cx) => {
+          this.rollbackRequest = null; this.start(cx, () => c.setAmend(!c.amend));
+        }, { disabled: !ready || locked || !c.snapshot?.head, text: "Amend" }))
+        .when(c.amend, (el) => el.child(div().text_color(t.muted).text_size(10).child("Rewrites HEAD; unchecked previous files remain in the commit"))))
+      .child(Textarea.new(this.messageState).w_full().flex_1().min_h(0).px(10).py(6)
+        .rounded(UI.commitRadius).bg(t.input).text_size(UI.text).line_height("20px").text_color(t.foreground)
+        .border(2).border_color(this.messageFocused ? t.accent : t.border).accessibility_label("Commit message"))
+      .child(h_flex().h(UI.commitHeight).flex_none().gap(8).items_center().overflow_x_scroll()
+        .child(this.control(t, "commit", c.amend ? "Amend previous commit with selected changes" : "Commit selected changes", c.busy ? "Working…" : "Commit",
+          (cx) => this.mutate(cx, { type: "commit" }), { primary: true, disabled }).h(UI.commitHeight).px(12))
+        .child(this.control(t, "commit-push", "Commit selected changes and push", "Commit and push",
+          (cx) => this.mutate(cx, { type: "commit", push: true }), { disabled }).h(UI.commitHeight).px(12)));
   }
 
   sidebar(t, narrow) {
-    const c = this.controller, count = c.snapshot?.files.length ?? 0;
-    return v_flex().min_h(0).when(!narrow, (e) => e.w(UI.sidebar).h_full().flex_none().border_l(1).border_color(t.border))
-      .when(narrow, (e) => e.w_full().h(Math.max(240, this.height * 0.53)).flex_none().border_t(1).border_color(t.border))
-      .child(h_flex().h(UI.header).flex_none().px(18).gap(12).items_center().child(div().font_semibold().child("Changes"))
-        .child(div().px(7).py(3).rounded(4).bg(t.raised).text_size(10).child(String(count))).child(div().flex_1())
-        .child(this.control(t, "refresh", "Refresh changes", svg("mods/git-graph/icons/refresh.svg").size(14), (cx) => this.start(cx, () => c.refresh()), { disabled: c.loading || c.busy })))
-      .when(c.busy, (e) => e.child(div().px(18).pb(6).text_size(10).text_color(t.muted).child("Updating repository…")))
+    const c = this.controller, locked = c.busy || c.loading, ready = c.snapshot?.state === "ready";
+    const dirty = c.snapshot?.files.filter((file) => c.checked.has(file.path)) ?? [];
+    const conflict = c.snapshot?.files.some((file) => file.conflict);
+    return v_flex().min_h(0).min_w(0).h_full().when(narrow, (el) => el.w_full()).when(!narrow, (el) => el.w("48%").flex_none().border_r(1).border_color(t.border))
+      .child(h_flex().h(UI.header).flex_none().px(8).gap(4).items_center().overflow_x_scroll()
+        .child(this.control(t, "refresh", "Refresh changes", "Refresh", (cx) => {
+          this.rollbackRequest = null; this.start(cx, () => c.refresh());
+        }, { disabled: locked }))
+        .child(this.control(t, "stash", "Stash selected changed files", "Stash selected", (cx) => this.mutate(cx, { type: "stash" }),
+          { disabled: !ready || locked || conflict || !dirty.length }))
+        .child(this.control(t, "rollback", "Roll back selected changed files", "Rollback selected", () => {
+          this.rollbackRequest = { key: this.confirmationKey(), count: dirty.length };
+        }, { disabled: !ready || locked || conflict || !dirty.length })))
+      .when(Boolean(this.rollbackRequest), (el) => el.child(v_flex().flex_none().px(10).py(6).gap(4).bg(t.raised)
+        .child(div().text_color(t.ansi1).child(`Permanently discard changes in ${this.rollbackRequest.count} selected files? This can't be undone.`))
+        .child(h_flex().gap(8)
+          .child(this.control(t, "confirm-rollback", "Confirm permanent rollback of selected files", "Confirm rollback", (cx) => this.confirmRollback(cx), { disabled: locked }))
+          .child(this.control(t, "cancel-rollback", "Cancel rollback", "Cancel", () => { this.rollbackRequest = null; })))))
+      .when(Boolean(conflict), (el) => el.child(div().px(10).py(4).text_color(t.ansi1).child("Resolve conflicts outside Changes before committing, stashing, or rolling back.")))
+      .when(locked, (el) => el.child(div().px(10).text_color(t.muted).child(c.busy ? "Updating repository…" : "Refreshing changes…")))
       .child(this.tree(t));
   }
 
@@ -195,8 +246,6 @@ export default class Changes extends View {
       .when(narrow, (e) => e.w_full().h(Math.max(240, this.height * 0.47)).flex_none())
       .child(h_flex().h(UI.header).flex_none().px(20).gap(10).items_center().border_b(1).border_color(t.border)
         .child(div().flex_1().min_w(0).truncate().font_semibold().child(file ? displayPath(file.path) : "Changes")))
-      .when(Boolean(c.error), (e) => e.child(v_flex().max_h(120).overflow_y_scrollbar().p(14).gap(6).text_color(t.ansi1)
-        .child("Git couldn't complete the request").child(c.error).child(div().text_color(t.muted).child("Check Git's message, then refresh or try again. Your commit draft is unchanged."))))
       .child(v_flex().flex_1().min_w(0).min_h(0).font_family(settings()?.font_family ?? "JetBrains Mono").text_size(UI.code)
         .child(div().flex_1().w_full().min_w(0).min_h(0).relative()
           .when(!rows, (e) => e.child(div().p(20).text_color(t.muted).child(message)))
@@ -221,9 +270,11 @@ export default class Changes extends View {
         const unit = Number(settings()?.zoom) || 1, width = size.width / unit, height = size.height / unit;
         if (width !== this.width || height !== this.height) { this.width = width; this.height = height; cx.notify(); }
       })
-      .child((narrow ? v_flex() : h_flex()).w_full().flex_1().min_h(0).min_w(0).items_start()
-        .when(narrow, (e) => e.overflow_y_scrollbar())
-        .child(this.diff(t, narrow)).child(this.sidebar(t, narrow)))
+      .when(Boolean(this.controller.error), (el) => el.child(v_flex().w_full().max_h(100).flex_none().overflow_y_scrollbar().px(10).py(6).gap(4)
+        .text_color(t.ansi1).child(this.controller.error)
+        .child(div().text_color(t.muted).child("Check Git's message before trying again."))))
+      .child(h_flex().w_full().flex_1().min_h(0).min_w(0)
+        .child(this.sidebar(t, narrow)).when(!narrow, (el) => el.child(this.diff(t, false))))
       .child(this.commitFooter(t));
   }
 }
