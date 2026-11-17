@@ -196,6 +196,9 @@ Install from this repository's root:
 5. Merge `herdr/keys.json` into `~/.config/herdr-app/keys.json`. If no file exists, copy it there. Otherwise, merge each section and key, retaining unrelated sections and bindings. Choose explicitly between conflicting bindings. The file includes the original global and terminal bindings alongside T3 layout and mod bindings. Layout-scoped shortcuts may override global shortcuts.
 6. Select `herdr-t3` in Herdr's layout picker. See the [T3 guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md) for usage and key commands.
 
+For a customized layout, also merge the `branches` block and update `t3-chrome` to expose its tab.
+Copy the complete `t3-branches/` directory, including its icons and local modules.
+
 The T3 bindings target macOS. On Linux and Windows, Herdr defaults can bypass layout rules, including close confirmation and Home-aware space numbering. Rebind those keys manually as described in the [upstream key guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md#keys).
 
 Open the right-side panel with its existing button or binding, then select **Git** beside **Files**. The panel button reopens the last selected page. Git Graph follows the focused terminal's repository and offers commit details, diffs, and Git actions. In a folder containing repositories, its Manygit view lists them. See the [Git Graph guide](https://github.com/rabeeh-ta/herdr-git-graph/tree/0da886243b2e27a6068d6adb7c5c26f349cdc04e#what-it-does) for its actions and limits. Manygit requires `find` and `env` and does not work on Windows.
@@ -203,6 +206,25 @@ Open the right-side panel with its existing button or binding, then select **Git
 Files follows the focused terminal's live directory, falling back to the space's configured folder when needed. It keeps browsing state per space and invalidates cached content when that space's directory or machine changes. Space switches reject pending reads from the previous context.
 
 After updating, recopy both `t3-files/` and `t3-changes/`, including each mod's local `context.js` module.
+
+Select **Branches** in the right-side panel to browse the focused repository's branch tree.
+**Pinned**, **Local**, and **Remote** folders separate favorites, local branches, and remote-tracking branches.
+Slashes create nested folders: `backup/123` and `backup/234` share the `backup` folder.
+Remote branches also group beneath their remote name, such as `origin`.
+
+Use **Pin** or **Unpin** beside a branch to update **Pinned**.
+Pins persist per machine and repository, keeping local and remote refs distinct.
+Pinning does not remove a branch from its original folder.
+Selecting a branch does not check it out or change the repository.
+Use **Refresh** to reread branches after external Git changes.
+Refresh does not fetch from remotes or access the network.
+
+In the branch tree, use Up and Down to navigate, and Left and Right to collapse or expand folders.
+Enter selects a branch or toggles a folder; Space pins or unpins the focused branch.
+Long names remain accessible through horizontal scrolling.
+Install updates by copying `t3-branches/`, updating `t3-chrome/`, and merging the layout's `branches` block.
+Preserve the `branches` block ID and its `t3-branches` content mod.
+Native Branches rendering still requires verification in Herdr App.
 
 Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository. All changed files appear once in a directory tree. Check files individually, check a folder's descendants, or select all files. Selecting a row previews its diff in wide panels. Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page.
 
