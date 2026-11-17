@@ -212,19 +212,42 @@ Select **Branches** in the right-side panel to browse the focused repository's b
 Slashes create nested folders: `backup/123` and `backup/234` share the `backup` folder.
 Remote branches also group beneath their remote name, such as `origin`.
 
-Use **Pin** or **Unpin** beside a branch to update **Pinned**.
+Use **Pin** or **Unpin** beside a branch, or in its context menu, to update **Pinned**.
 Pins persist per machine and repository, keeping local and remote refs distinct.
 Pinning does not remove a branch from its original folder.
 Selecting a branch does not check it out or change the repository.
+
+Right-click a branch, including a **Pinned** copy, to open its actions.
+Folders have no branch actions.
+Available actions include **Checkout**, **Merge into current**, **Rebase current onto selected**, and **Interactive rebase current onto selected**.
+The menu also offers **New branch**, **New tag**, **Delete**, **Copy branch name**, and **Pin** or **Unpin**.
+Actions that don't apply to the current branch or detached HEAD are omitted.
+Local checkout runs directly; other mutations require a dialog.
+Remote checkout creates a tracking branch with an unused local name.
+New tags support an optional annotation message.
+Local deletion defaults to protecting unmerged commits; force deletion requires an explicit checkbox.
+Remote deletion confirms a shared server change and accesses the network.
+
+Interactive rebase provides a native editable todo with pick, drop, reorder, squash, and fixup.
+Only captured eligible commits are accepted; exec, edit, reword, and shell commands are forbidden.
+Branch actions reject changed focus, repository, HEAD, or selected branch tips.
+Git failures remain visible, and conflicts remain available for resolution outside Branches.
+Branches never automatically abort, reset, or force a conflicting operation.
+Interactive rebase requires Git, POSIX `sh`, and `env` on the repository machine.
+After attempted mutations, Branches refreshes the original repository view and notifies Git Graph.
 Use **Refresh** to reread branches after external Git changes.
 Refresh does not fetch from remotes or access the network.
 
 In the branch tree, use Up and Down to navigate, and Left and Right to collapse or expand folders.
 Enter selects a branch or toggles a folder; Space pins or unpins the focused branch.
+Shift+F10 or the context-menu key opens actions for the focused branch.
+In the menu, arrows navigate, Enter activates an action, and Escape closes the menu.
+Tab reaches dialog inputs and buttons; Escape cancels before execution.
 Long names remain accessible through horizontal scrolling.
 Install updates by copying `t3-branches/`, updating `t3-chrome/`, and merging the layout's `branches` block.
 Preserve the `branches` block ID and its `t3-branches` content mod.
-Native Branches rendering still requires verification in Herdr App.
+Native Branches rendering, contrast across themes, and platform keyboard behavior still require verification in Herdr App.
+Mock-native control harnesses exercise handlers, not pixels or real-app layout.
 
 Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository. All changed files appear once in a directory tree. Check files individually, check a folder's descendants, or select all files. Selecting a row previews its diff in wide panels. Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page.
 

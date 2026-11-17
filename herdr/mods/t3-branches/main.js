@@ -1,9 +1,12 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, theme } from "herdr";
+import { spaces, panes, focused, exec, theme, props, shared, setShared, openOverlay } from "herdr";
 import { BranchesController } from "./controller.js";
-import { branchTree, treeRows } from "./model.js";
+import { branchTree, treeRows, contextKey, repositoryKey } from "./model.js";
 import { resolveContext } from "./context.js";
+import { readActionContext, actionItems } from "./actions.js";
+import { Menu, ownerKey, requestKey, resultKey } from "./menu.js";
+import { Dialog } from "./dialog.js";
 
 const MOD = "mods/t3-branches";
 // Match Changes' compact native tree and control scale.
@@ -12,8 +15,8 @@ const location = () => resolveContext(spaces(), panes(), focused());
 const pinKey = (key) => `pins.v1:${key}`;
 const problem = (error) => error instanceof Error ? error.message : String(error);
 
-export default class Branches extends View {
-  init(_props, cx) {
+class Branches {
+  init(cx) {
     this.id = `t3-branches-${Math.random().toString(36).slice(2)}`;
     this.handle = cx.focus_handle();
     this.handles = Object.fromEntries(["refresh", "tree", "pin"].map((id) => [id, cx.focus_handle()]));
@@ -23,16 +26,20 @@ export default class Branches extends View {
     this.treeAt = 0;
     this.selectedRef = null;
     this.storageError = null;
+    this.epoch = 0;
+    this.seenChange = shared("t3-branches.changed")?.id;
     this.controller = new BranchesController({ exec, location,
       changed: () => { this.syncRows(); cx.notify(); },
       loadPins: (key) => this.loadPins(key),
       savePins: (key, refs) => this.savePins(key, refs) });
     this.syncRows();
+    this.publishOwner();
     this.start(cx, () => this.controller.refresh());
     // Watch focus outside render. Context transitions invalidate old reads before scheduling new work.
     this.focusWatch = cx.timer.every(150, (cx) => {
       if (this.controller.closed) return;
       const switched = this.requestContext(cx);
+      this.consumeSignals(cx);
       const control = Object.keys(this.handles).find((id) => this.handles[id].is_focused());
       if (control !== this.focusedControl || switched) { this.focusedControl = control; cx.notify(); }
     });
@@ -40,6 +47,7 @@ export default class Branches extends View {
 
   close() {
     this.controller.close();
+    setShared(ownerKey(this.id), null);
     this.contextWork?.cancel();
     this.focusWatch?.cancel();
     this.treeScroll.release();
@@ -47,8 +55,64 @@ export default class Branches extends View {
 
   start(cx, action) { cx.spawn(async () => { await action(); }); }
 
+  publishOwner() {
+    setShared(ownerKey(this.id), { key: contextKey(location()), epoch: this.epoch,
+      repo: this.controller.snapshot?.state === "ready" ? repositoryKey(this.controller.snapshot) : null });
+  }
+
+  consumeSignals(cx) {
+    this.publishOwner();
+    const request = shared(requestKey(this.id));
+    if (request) {
+      setShared(requestKey(this.id), null);
+      const c = this.controller;
+      const valid = request.key === c.context && request.key === contextKey(location())
+        && request.epoch === this.epoch && request.repo === repositoryKey(c.snapshot ?? {});
+      const branch = valid && c.snapshot?.branches.find((branch) => branch.ref === request.ref);
+      if (branch && !c.loading) c.togglePin(branch);
+      setShared(resultKey(this.id), { id: request.id,
+        error: !branch || c.loading ? "The branch view changed. Reopen the menu and try again." : this.storageError || c.error });
+    }
+    const changed = shared("t3-branches.changed");
+    if (changed?.id !== this.seenChange) {
+      this.seenChange = changed?.id;
+      if (changed && this.controller.snapshot?.state === "ready"
+        && changed.repo === repositoryKey(this.controller.snapshot)) this.start(cx, () => this.controller.refresh());
+    }
+  }
+
+  openMenu(row, at, cx) {
+    const c = this.controller;
+    if (!row.branch || c.closed || c.loading || this.menuLoading || c.snapshot?.state !== "ready") return;
+    this.handles.tree.focus();
+    this.treeAt = at;
+    this.selectedRef = row.branch.ref;
+    const snapshot = c.snapshot, key = contextKey(location()), epoch = this.epoch;
+    if (key !== c.context) return;
+    this.publishOwner();
+    this.menuLoading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const ctx = await readActionContext(snapshot, row.branch, exec);
+        if (c.closed || this.epoch !== epoch || c.context !== key || contextKey(location()) !== key) return;
+        const pinned = c.pins.has(row.branch.ref);
+        openOverlay({ mod: "t3-branches", kind: "popup", at: "pointer", width: 312,
+          height: Math.min(520, 156 + actionItems(ctx, pinned).length * 30),
+          props: { role: "menu", ctx, pinned, origin: { view: this.id, key, epoch, repo: repositoryKey(snapshot) } } });
+      } catch (error) {
+        if (!c.closed && this.epoch === epoch && contextKey(location()) === key) c.error = problem(error);
+      } finally {
+        this.menuLoading = false;
+        if (!c.closed) cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
   requestContext(cx) {
     if (!this.controller.transition()) return false;
+    this.epoch++;
+    this.publishOwner();
     this.selectedRef = null;
     this.storageError = null;
     this.collapsed.clear();
@@ -81,6 +145,7 @@ export default class Branches extends View {
       this.storageError = null;
     } catch (error) {
       this.storageError = `Couldn't save pinned branches: ${problem(error)}. Pins weren't saved; check local storage, then try pinning again.`;
+      throw error;
     }
   }
 
@@ -122,6 +187,8 @@ export default class Branches extends View {
       this.moveTo(e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : this.treeAt + (e.key === "down" ? 1 : -1));
     } else if (e.key === "enter") this.activate(row);
     else if (e.key === "space" && row.branch && !this.controller.loading) this.togglePin(row);
+    else if (row.branch && ((e.key === "f10" && e.modifiers?.shift)
+      || ["contextmenu", "context_menu", "menu", "apps"].includes(e.key))) this.openMenu(row, this.treeAt, cx);
     else if (e.key === "right" && row.children) {
       if (this.collapsed.has(row.id)) { this.collapsed.delete(row.id); this.syncRows(); }
       else if (rows[this.treeAt + 1]?.depth > row.depth) this.moveTo(this.treeAt + 1);
@@ -148,7 +215,12 @@ export default class Branches extends View {
       .child(content);
     if (handle && !disabled && tabbable) el = el.track_focus(handle).tab_index(0)
       .on_key_down((e, cx) => {
-        if (!handle.is_focused() || !["enter", "space"].includes(e.key)) return;
+        if (!handle.is_focused()) return;
+        if (id === "pin" && ((e.key === "f10" && e.modifiers?.shift)
+          || ["contextmenu", "context_menu", "menu", "apps"].includes(e.key))) {
+          cx.stop_propagation(); this.openMenu(this.visibleRows[this.treeAt], this.treeAt, cx); return;
+        }
+        if (!["enter", "space"].includes(e.key)) return;
         cx.stop_propagation(); action(cx); cx.notify();
       })
       .when(handle.is_focused(), (el) => el.relative().child(div().absolute().inset_0().rounded(UI.radius).border(2).border_color(t.accent)));
@@ -171,6 +243,9 @@ export default class Branches extends View {
       .when(on, (el) => el.bg(t.selected).font_medium()).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
       .role("treeitem").accessibility_label(`${label}${on ? ", selected" : ""}`).cursor_pointer()
       .on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = at; this.activate(row); cx.notify(); })
+      .when(Boolean(branch), (el) => el.on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation(); this.openMenu(row, at, cx);
+      }))
       .child(div().size(16).flex_none().flex().items_center().justify_center()
         .when(!branch, (el) => el.child(svg(`${MOD}/icons/chevron-${open ? "down" : "right"}.svg`).size(12).text_color(t.muted))))
       .child(svg(`${MOD}/icons/${branch ? "branch" : "folder"}.svg`).size(16).flex_none().text_color(t.muted))
@@ -187,7 +262,7 @@ export default class Branches extends View {
       .child(div().flex_1().min_h(0).min_w(0).relative()
         .child(div().id(`${this.id}-tree-x`).size_full().min_w(0).overflow_x_scroll()
           .child(div().w_full().min_w(this.treeWidth).h_full().track_focus(this.handles.tree).tab_index(0)
-            .role("tree").accessibility_label("Branches. Arrows navigate, Enter selects or expands, Space pins a branch. Tab reaches the focused branch's Pin button. Selecting never checks out a branch.")
+            .role("tree").accessibility_label("Branches. Arrows navigate, Enter selects or expands, Space pins a branch. Shift+F10 opens branch actions. Tab reaches the focused branch's Pin button. Selecting never checks out a branch.")
             .on_key_down((e, cx) => this.treeKey(e, cx))
             .on_scroll_wheel((_e, cx) => cx.stop_propagation())
             .child(v_virtual_list(`${this.id}-tree-y`, rows.length, UI.row, (at) => rows[at].id,
@@ -217,7 +292,7 @@ export default class Branches extends View {
         }
       })
       .child(h_flex().h(UI.header).flex_none().px(8).gap(6).items_center()
-        .child(div().flex_1().min_w(0).text_color(t.muted).child(`${c.snapshot?.branches.length ?? 0} branches · Read-only`))
+        .child(div().flex_1().min_w(0).text_color(t.muted).child(this.menuLoading ? "Loading branch actions…" : `${c.snapshot?.branches.length ?? 0} branches`))
         .child(this.control(t, "refresh", "Refresh branches", h_flex().gap(4).items_center()
           .child(svg(`${MOD}/icons/refresh.svg`).size(14).flex_none()).child("Refresh"),
           (cx) => this.start(cx, () => c.refresh()), c.loading)))
@@ -229,4 +304,15 @@ export default class Branches extends View {
       .when(Boolean(state), (el) => el.child(div().w_full().flex_none().px(10).py(6).text_color(t.muted).child(state)))
       .child(this.tree(t));
   }
+}
+
+// Overlays share this mod's storage, but communicate with the owning view through data-only signals.
+export default class BranchesView extends View {
+  init(_props, cx) {
+    const role = props()?.role;
+    this.part = role === "menu" ? new Menu() : role === "dialog" ? new Dialog() : new Branches();
+    this.part.init(cx);
+  }
+  render(cx) { return this.part.render(cx); }
+  close() { this.part.close?.(); }
 }
