@@ -17,6 +17,8 @@ Personal extensions, skills, and configuration for [Oh My Pi](https://github.com
 
 Requires **Oh My Pi 18.11.2+**. Extensions run as TypeScript without a build. Run commands from this repository's root.
 
+The baseline above does not establish `/deep-review` compatibility. Its minimum compatible OMP version and runtime behavior remain unverified.
+
 ### Configuration and installation
 
 Review provider/model choices, then load the settings for one session:
@@ -49,6 +51,45 @@ omp plugin link .
 These links do not overwrite existing files. Merge existing rules, personality instructions, or agent definitions as needed. For named profiles or XDG layouts, set `agent_dir` to the active agent directory. Root plugin linking does **not** discover the nested skills, agents, or commands, so keep the explicit links.
 
 Oh My Pi discovers the linked Markdown files as native user commands from the active agent directory's `commands/` folder. Use `/task-start`, `/daily-review`, `/weekly-review`, or `/experiment`. Restart the session after installation. The commands load their skill and templates independently of the working directory. Command names may collide with existing user, project, extension, or plugin commands; inspect and resolve collisions before use. Existing command files are not overwritten.
+
+### Deep review
+
+`/deep-review` reviews local Git changes through specialist task agents. Git must be available on `PATH`.
+The command runs Git through OMP's injected `api.exec`, using argument arrays.
+Repository discovery starts from the active session's working directory. It never falls back to this toolkit's repository.
+
+Install a self-contained copy, including in devcontainers:
+
+1. Set `agent_dir` to the active agent directory, as shown above.
+2. Inspect `$agent_dir/commands/deep-review` first. Reconcile any existing installation before copying.
+3. Copy the entire command directory from this repository's root:
+
+   ```sh
+   mkdir -p "$agent_dir/commands"
+   cp -R omp/agent/commands/deep-review "$agent_dir/commands/"
+   ```
+
+4. Install the `deep-reviewer` and `deep-review-*` task agents too. The task-agent installation loop above includes those definitions.
+5. Restart the OMP session.
+
+Copy-only installation requires no dependency installation, build, npm publication, or native runtime package.
+The command imports only Node builtins and relative runtime modules. OMP imports are type-only.
+Keep copied task-agent definitions available inside the devcontainer too; host-only symlinks cannot provide inaccessible files.
+Alternatively, symlink the command directory using the existing convention when the source remains accessible.
+Root plugin linking alone does not install this command or its task agents.
+
+| Usage | Behavior |
+| --- | --- |
+| `/deep-review pr <base-ref> [review focus]` | Review committed changes against a base reference. |
+| `/deep-review uncommitted [review focus]` | Review staged, unstaged, and untracked changes. |
+| `/deep-review commit <commit-ref> [review focus]` | Review a specific commit without checking it out. |
+| `/deep-review mode` | Show the repository's persistent review mode. |
+| `/deep-review mode auto` | Use classification and adaptive specialist coverage; this is the default. |
+| `/deep-review mode quick` | Use one reduced-depth reviewer, plus security review when explicitly requested. |
+| `/deep-review mode full` | Run all seven specialists, including security. |
+
+Mode selection persists in `.omp/deep-review-settings.json` within the reviewed repository.
+In `auto`, security runs only when explicitly requested.
 
 ### Private engineering reflection
 
