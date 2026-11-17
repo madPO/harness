@@ -129,7 +129,7 @@ class Branches {
     this.storageError = null;
     try {
       const stored = localStorage.getItem(pinKey(key));
-      if (stored === null) return [];
+      if (stored === null || stored === undefined) return [];
       const refs = JSON.parse(stored);
       if (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string")) throw new Error("Invalid pin preferences");
       return refs;

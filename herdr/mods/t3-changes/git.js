@@ -1,4 +1,4 @@
-import { parseStatus, groupsOf, parseDiff, parsePrevious, validPath, commitArgs, repositoryKey } from "./model.js";
+import { parseStatus, groupsOf, parsePrevious, validPath, commitArgs, repositoryKey } from "./model.js";
 
 // No shell, external diff driver, textconv, fsmonitor, or optional index writes.
 export const READ = ["--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -48,30 +48,6 @@ export async function readPrevious(snapshot, exec) {
   const identity = await readIdentity(snapshot, exec);
   if (identity.head !== snapshot.head || identity.branch !== snapshot.branch) throw new Error("Repository HEAD changed. Refresh before enabling Amend.");
   return { head: snapshot.head, message: commit.message, files };
-}
-
-export async function readDiff(snapshot, file, exec) {
-  if (!validPath(file?.path) || !["staged", "unstaged", "previous"].includes(file.group)) throw new Error("Select a changed file");
-  if (file.conflict) return [{ kind: "note", text: "Unresolved conflict. Resolve this file outside Changes, then refresh." }];
-  const options = ["--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3"];
-  let result;
-  if (file.group === "previous") {
-    const commit = await previousCommit(snapshot, exec);
-    result = await run(exec, snapshot, ["diff-tree", "--root", "--no-commit-id", "-r", "-p", ...options, ...commit.revisions, "--", file.path]);
-    checked(result);
-  } else if (file.untracked) {
-    // ls-files only returns checkout-relative entries. Git's no-index diff lstat's
-    // the final entry: symlinks are diffed as link text, never opened as targets.
-    const listed = checked(await run(exec, snapshot, ["ls-files", "--others", "--exclude-standard", "-z", "--", file.path]));
-    if (!listed.split("\0").includes(file.path)) throw new Error("This untracked file changed. Refresh to continue.");
-    result = await run(exec, snapshot, ["diff", "--no-index", ...options, "--", "/dev/null", file.path]);
-    if (result.code !== 0 && result.code !== 1) throw new Error(message(result));
-    if (result.code === 1 && !result.stdout) throw new Error(message(result));
-  } else {
-    result = await run(exec, snapshot, ["diff", ...(file.group === "staged" ? ["--cached"] : []), ...options, "--", file.path]);
-    checked(result);
-  }
-  return parseDiff(result.stdout);
 }
 
 // The controller supplies a live context guard. Checks surround every awaited

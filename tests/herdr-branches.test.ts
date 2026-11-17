@@ -369,3 +369,144 @@ describe("Branches focus context", () => {
       .toEqual({ space: "b", cwd: "/standalone", on: "other" });
   });
 });
+
+test("Branches native storage accepts absent pins, persists pins, and exposes corrupt preferences", async () => {
+  const context = repo();
+  const script = `
+    import { mock } from "bun:test";
+    import assert from "node:assert/strict";
+    const cwd = ${JSON.stringify(context.cwd)};
+    const values = new Map(), signals = new Map(), pending = [];
+    let missing, readError = null, writeError = null, drawn = [], controls = new Map();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+      getItem(key) {
+        if (readError) throw readError;
+        return values.has(key) ? values.get(key) : missing;
+      },
+      setItem(key, value) {
+        if (writeError) throw writeError;
+        values.set(key, value);
+      },
+    } });
+    const element = () => {
+      let label;
+      const node = new Proxy({}, { get: (_, key) => {
+        if (key === "then") return undefined;
+        if (key === "when") return (condition, apply) => { if (condition) apply(node); return node; };
+        if (key === "child") return (value) => { if (typeof value === "string") drawn.push(value); return node; };
+        if (key === "accessibility_label") return (value) => { label = value; return node; };
+        if (key === "on_click") return (callback) => { if (label) controls.set(label, callback); return node; };
+        return () => node;
+      } });
+      return node;
+    };
+    mock.module("gpui-kit", () => ({ View: class {}, div: element, svg: element }));
+    mock.module("gpui-base", () => ({
+      h_flex: element, v_flex: element,
+      InputState: { new: element }, Input: { new: element },
+      TextareaState: { new: element }, Textarea: { new: element }, Checkbox: { new: element },
+      VirtualListScrollHandle: { new: () => ({ release() {}, scroll_to_item() {} }) },
+      Scrollbar: { vertical: element, horizontal: element },
+      v_virtual_list: (_id, count, _height, _key, render) => { render({ start: 0, end: count }); return element(); },
+    }));
+    mock.module("herdr", () => ({
+      spaces: () => [{ id: "first", active: true, folder: cwd, machine: null, tabs: [] }],
+      panes: () => [], focused: () => null, props: () => ({}),
+      theme: () => new Proxy({}, { get: () => "#112233" }),
+      shared: (key) => signals.get(key), setShared: (key, value) => signals.set(key, value),
+      openOverlay() {}, closeOverlay() {},
+      exec: async (program, argv, options) => {
+        assert.equal(program, "git"); assert.equal(options.on, null);
+        const result = Bun.spawnSync([program, ...argv], { cwd: options.cwd, env: ${JSON.stringify(env)} });
+        return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    }));
+    const cx = {
+      focus_handle: () => ({ is_focused: () => false, focus() {} }),
+      notify() {}, stop_propagation() {},
+      spawn(callback) { pending.push(callback()); },
+      timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+    };
+    const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
+    // Platform-only imports must load after native mocks register; static imports run before mock registration.
+    const { default: BranchesView } = await import(${JSON.stringify(new URL("../herdr/mods/t3-branches/main.js", import.meta.url).href)});
+    const mount = async () => {
+      const view = new BranchesView(); view.init({}, cx); await settle();
+      assert.equal(view.part.controller.snapshot.state, "ready");
+      assert.equal(view.part.controller.error, null);
+      return view;
+    };
+    const render = (view) => { drawn = []; controls = new Map(); view.render(cx); };
+    const assertHealthy = (view, pinned = false) => {
+      render(view);
+      assert(drawn.includes("main"), "actual branch rows must render");
+      assert(drawn.includes("1 branches"));
+      assert.equal(drawn.some(text => text.includes("Couldn't load pinned branches")), false);
+      assert.equal(drawn.some(text => text.includes("Couldn't save pinned branches")), false);
+      assert.equal(view.part.storageError, null);
+      assert(controls.has((pinned ? "Unpin" : "Pin") + " local branch main"));
+    };
+    const pin = (view) => {
+      render(view);
+      const click = controls.get("Pin local branch main");
+      assert(click, "the rendered branch must expose its Pin control");
+      click({}, cx);
+    };
+    const key = "pins.v1:" + JSON.stringify([null, cwd]);
+    const saved = JSON.stringify(["refs/heads/main"]);
+    for (const absent of [undefined, null]) {
+      missing = absent; values.clear();
+      const view = await mount();
+      assertHealthy(view);
+      assert.equal(view.part.controller.pins.size, 0);
+      assert.equal(values.size, 0, "missing preferences must not write storage");
+      pin(view);
+      assert.deepEqual([...values], [[key, saved]], "pins retain their machine/repository storage key");
+      assertHealthy(view, true);
+      view.close();
+      const reopened = await mount();
+      assert.deepEqual([...reopened.part.controller.pins], ["refs/heads/main"]);
+      assertHealthy(reopened, true);
+      reopened.close();
+    }
+    for (const corrupt of ["{", "", "undefined", "null", "{}", '["refs/heads/main",1]']) {
+      values.set(key, corrupt);
+      const view = await mount();
+      render(view);
+      assert(drawn.includes("main"), "corrupt preferences must not hide branches");
+      assert(drawn.some(text => text.startsWith("Couldn't load pinned branches:")));
+      assert.equal(view.part.controller.pins.size, 0);
+      assert.equal(values.get(key), corrupt, "loading must not silently replace corrupt preferences");
+      pin(view);
+      assert.equal(values.get(key), saved);
+      assertHealthy(view, true);
+      view.close();
+      const reopened = await mount();
+      assertHealthy(reopened, true);
+      reopened.close();
+    }
+    values.clear(); readError = new Error("Storage unavailable");
+    const unreadable = await mount();
+    render(unreadable);
+    assert(drawn.some(text => text.includes("Couldn't load pinned branches: Storage unavailable")));
+    readError = null;
+    pin(unreadable);
+    assertHealthy(unreadable, true);
+    unreadable.close();
+    values.clear();
+    const unwritable = await mount();
+    writeError = new Error("Storage is full");
+    pin(unwritable); render(unwritable);
+    assert(drawn.some(text => text.includes("Couldn't save pinned branches: Storage is full")));
+    assert.equal(unwritable.part.controller.error, "Storage is full");
+    assert.equal(unwritable.part.controller.pins.size, 0);
+    assert.equal(values.size, 0);
+    writeError = null; unwritable.close();
+    console.log("Branches native pin storage passed");
+  `;
+  // Native module mocks stay in this child process and cannot contaminate other suites.
+  const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
+  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  expect(stdout).toContain("Branches native pin storage passed");
+}, 30_000);

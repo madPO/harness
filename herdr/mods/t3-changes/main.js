@@ -2,11 +2,11 @@ import { View, div } from "gpui-kit";
 import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
 import { ChangesController } from "./controller.js";
-import { displayPath, repositoryKey, selectionKey, fileTree, treeRows } from "./model.js";
+import { displayPath, repositoryKey, fileTree, treeRows } from "./model.js";
 import { TREE_ROW, treeRow, statusBadge } from "./tree-row.js";
 import { resolveContext } from "./context.js";
 
-const UI = { narrow: 900, header: 36, diffRow: 24, diffScrollbar: 16, text: 12, code: 12, radius: 5, commitRadius: 8, commitHeight: 30 };
+const UI = { header: 36, scrollbar: 16, text: 12, radius: 5, commitRadius: 8, commitHeight: 30 };
 const location = () => resolveContext(spaces(), panes(), focused());
 
 export default class Changes extends View {
@@ -97,7 +97,7 @@ export default class Changes extends View {
 
   activateRow(row, cx) {
     if (!row.file) this.toggle(this.collapsed, `changes:${row.path}`);
-    else if (!this.controller.busy && !this.controller.loading) this.start(cx, () => this.controller.select(row.file));
+    else this.toggleFiles([row.path]);
     cx.notify();
   }
   toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
@@ -111,6 +111,7 @@ export default class Changes extends View {
       .when(!disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
       .border(2).border_color(handle?.is_focused() && !disabled ? t.accent : "#00000000")
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => cx.stop_propagation())
       .on_change((_checked, cx) => { cx.stop_propagation(); if (!disabled) action(cx); cx.notify(); })
       .child(div().size(14).flex_none().flex().items_center().justify_center().rounded(2).border_1()
         .border_color(checked || partial ? t.accent : t.muted).bg(t.input).text_color(t.foreground).text_size(11)
@@ -129,13 +130,13 @@ export default class Changes extends View {
       const open = !this.collapsed.has(`changes:${row.path}`);
       return treeRow(treeTheme, "mods/t3-files",
         { name: displayPath(row.name), path: row.path, depth: row.depth, dir: !row.file, open }, `${this.id}-row-${row.file ? "file" : "folder"}-${row.path}`,
-        { truncate: false, selected: Boolean(row.file && selectionKey(c.selected) === selectionKey(row.file)),
+        { truncate: false, selected: count === paths.length,
           focused: this.handles.tree.is_focused() && i === at,
           leading: this.checkbox(t, row.file ? `check-${row.path}` : "folder-" + row.path,
             `${count && count !== paths.length ? "Partially selected. " : ""}Include ${displayPath(row.path)}`, count === paths.length,
             () => this.toggleFiles(paths), { disabled: locked, partial: count > 0 && count < paths.length }),
           trailing: row.file ? statusBadge(row.file.status).when(row.file.conflict, (el) => el.text_color(t.ansi1)) : null })
-        .role("button").accessibility_label(row.file ? `Preview ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
+        .role("button").accessibility_label(row.file ? `${c.checked.has(row.path) ? "Exclude" : "Include"} ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
         .cursor_pointer().on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = i; this.activateRow(row, cx); });
     };
     return v_flex().w_full().flex_1().min_h(0).min_w(0)
@@ -145,9 +146,9 @@ export default class Changes extends View {
             partial: c.checked.size > 0 && c.checked.size < files.length, text: "Changes" }))
         .child(div().text_color(t.muted).child(`${files.length} files · ${c.checked.size} selected`)))
       .child(div().flex_1().min_h(0).min_w(0).relative()
-        .child(div().id(`${this.id}-tree-x`).size_full().min_w(0).overflow_x_scroll()
+        .child(div().id(`${this.id}-tree-x`).absolute().inset_0().min_w(0).overflow_x_scroll()
           .child(div().w_full().min_w(width).h_full().track_focus(this.handles.tree).tab_index(0)
-            .role("group").accessibility_label("Changed files. Arrows navigate, Enter previews or expands, Space toggles inclusion.")
+            .role("group").accessibility_label("Changed files. Arrows navigate, Enter toggles file inclusion or expands folders, Space toggles inclusion.")
             .on_key_down((e, cx) => {
               if (!this.handles.tree.is_focused()) return;
               const row = rows[at]; if (!row) return;
@@ -167,7 +168,7 @@ export default class Changes extends View {
               .track_scroll(this.treeScroll).size_full())
             .when(!rows.length, (el) => el.child(div().absolute().inset_0().p(12).text_color(t.muted).child(this.emptyMessage())))))
         .child(Scrollbar.vertical(`${this.id}-tree-y`).mode("always").viewport_from_layout().absolute().inset_0()))
-      .child(div().w_full().min_w(0).h(UI.diffScrollbar).flex_none().relative()
+      .child(div().w_full().min_w(0).h(UI.scrollbar).flex_none().relative()
         .child(Scrollbar.horizontal(`${this.id}-tree-x`).mode("always").viewport_from_layout().absolute().inset_0()));
   }
 
@@ -199,11 +200,11 @@ export default class Changes extends View {
           (cx) => this.mutate(cx, { type: "commit", push: true }), { disabled }).h(UI.commitHeight).px(12)));
   }
 
-  sidebar(t, narrow) {
+  fileList(t) {
     const c = this.controller, locked = c.busy || c.loading, ready = c.snapshot?.state === "ready";
     const dirty = c.snapshot?.files.filter((file) => c.checked.has(file.path)) ?? [];
     const conflict = c.snapshot?.files.some((file) => file.conflict);
-    return v_flex().min_h(0).min_w(0).h_full().when(narrow, (el) => el.w_full()).when(!narrow, (el) => el.w("48%").flex_none().border_r(1).border_color(t.border))
+    return v_flex().w_full().flex_1().min_h(0).min_w(0)
       .child(h_flex().h(UI.header).flex_none().px(8).gap(4).items_center().overflow_x_scroll()
         .child(this.control(t, "refresh", "Refresh changes", "Refresh", (cx) => {
           this.rollbackRequest = null; this.start(cx, () => c.refresh());
@@ -223,46 +224,9 @@ export default class Changes extends View {
       .child(this.tree(t));
   }
 
-  diffRow(row, t) {
-    if (row.kind === "hunk" || row.kind === "note") return h_flex().w_full().h(UI.diffRow).flex_none().px(20).items_center()
-      .text_color(row.kind === "hunk" ? t.accent : t.muted).child(row.text);
-    return h_flex().w_full().h(UI.diffRow).flex_none().items_center().whitespace_nowrap()
-      .when(row.kind === "+", (e) => e.bg(t.ansi2 + "22")).when(row.kind === "-", (e) => e.bg(t.ansi1 + "22"))
-      .child(div().w(34).flex_none().text_right().text_color(t.muted).text_size(10).child(row.old === undefined ? "" : String(row.old)))
-      .child(div().w(28).flex_none().text_right().text_color(t.muted).text_size(10).child(row.next === undefined ? "" : String(row.next)))
-      .child(div().w(24).flex_none().text_right().pr(6).text_color(row.kind === "+" ? t.ansi2 : row.kind === "-" ? t.ansi1 : t.muted).child(row.kind.trim()))
-      .child(div().flex_none().text_color(t.foreground).child(row.text.replace(/\t/g, "    ")));
-  }
-
-  diff(t, narrow) {
-    const c = this.controller, file = c.selected, snapshot = c.snapshot;
-    const rows = c.diff === null ? null : c.diff.filter((row) => row.kind !== "hunk"
-      && !(row.kind === "note" && /^(old mode|new mode|new file mode|deleted file mode) /.test(row.text)));
-    let message = !snapshot ? c.loading ? "Loading changes…" : "Focus a terminal in a repository, then refresh." : snapshot.state === "nofolder" ? "Focus a terminal to see changes in its repository."
-      : snapshot.state === "norepo" ? "This folder isn't a Git repository. Focus a terminal in a checkout." : !snapshot.files.length ? "Working tree clean" : !file ? "Select a changed file" : "Loading diff…";
-    const width = rows ? rows.reduce((max, row) => Math.max(max, 100 + row.text.replace(/\t/g, "    ").length * UI.code), 320) : 320;
-    return v_flex().min_w(0)
-      .when(!narrow, (e) => e.flex_1().h_full().min_h(0))
-      .when(narrow, (e) => e.w_full().h(Math.max(240, this.height * 0.47)).flex_none())
-      .child(h_flex().h(UI.header).flex_none().px(20).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(div().flex_1().min_w(0).truncate().font_semibold().child(file ? displayPath(file.path) : "Changes")))
-      .child(v_flex().flex_1().min_w(0).min_h(0).font_family(settings()?.font_family ?? "JetBrains Mono").text_size(UI.code)
-        .child(div().flex_1().w_full().min_w(0).min_h(0).relative()
-          .when(!rows, (e) => e.child(div().p(20).text_color(t.muted).child(message)))
-          .when(Boolean(rows), (e) => e.child(div().id(`${this.id}-diff-x`).size_full().min_w(0).overflow_x_scroll()
-            // Let the native list handle vertical wheel events before blocking the horizontal parent.
-            .child(div().w_full().min_w(width).h_full().on_scroll_wheel((_e, cx) => cx.stop_propagation())
-              .child(v_virtual_list(`${this.id}-diff`, rows.length, UI.diffRow, (i) => String(i),
-                (range) => rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-            .child(Scrollbar.vertical(`${this.id}-diff`).viewport_from_layout().absolute().inset_0())))
-        .when(Boolean(rows), (e) => e.child(div().w_full().min_w(0).h(UI.diffScrollbar).flex_none().relative()
-          .on_scroll_wheel((_e, cx) => cx.stop_propagation())
-          .child(Scrollbar.horizontal(`${this.id}-diff-x`).mode("always").viewport_from_layout().absolute().inset_0()))));
-  }
-
   render(cx) {
     this.requestContext(cx);
-    const t = theme(), narrow = this.width < UI.narrow;
+    const t = theme();
     return v_flex().id(this.id).size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(UI.text)
       .track_focus(this.handle).on_key_down((e, cx) => {
         if (this.handle.is_focused() && ["down", "enter", "tab"].includes(e.key)) { this.handles.tree.focus(); cx.stop_propagation(); cx.notify(); }
@@ -273,8 +237,7 @@ export default class Changes extends View {
       .when(Boolean(this.controller.error), (el) => el.child(v_flex().w_full().max_h(100).flex_none().overflow_y_scrollbar().px(10).py(6).gap(4)
         .text_color(t.ansi1).child(this.controller.error)
         .child(div().text_color(t.muted).child("Check Git's message before trying again."))))
-      .child(h_flex().w_full().flex_1().min_h(0).min_w(0)
-        .child(this.sidebar(t, narrow)).when(!narrow, (el) => el.child(this.diff(t, false))))
+      .child(this.fileList(t))
       .child(this.commitFooter(t));
   }
 }

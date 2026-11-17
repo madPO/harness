@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, symlinkSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseStatus, groupsOf, fileTree, treeRows, parseDiff, commitArgs, displayPath, parsePrevious, unifiedFiles } from "../herdr/mods/t3-changes/model.js";
-import { readSnapshot, readDiff, perform, type Exec } from "../herdr/mods/t3-changes/git.js";
+import { parseStatus, groupsOf, fileTree, treeRows, commitArgs, displayPath, parsePrevious, unifiedFiles } from "../herdr/mods/t3-changes/model.js";
+import { readSnapshot, perform, type Exec } from "../herdr/mods/t3-changes/git.js";
 import { ChangesController } from "../herdr/mods/t3-changes/controller.js";
 import { resolveContext } from "../herdr/mods/t3-changes/context.js";
 import type { Location } from "../herdr/mods/t3-changes/model.js";
@@ -64,13 +64,6 @@ describe("Changes calculations", () => {
       expect(tree[0].children?.map((node) => node.path)).toEqual(["a/b"]);
     }
   });
-  test("unified diffs preserve both gutters and no-final-newline notes", () => {
-    const rows = parseDiff("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -7,2 +7,2 @@\n same\n-old\n+new\n\\ No newline at end of file\n");
-    expect(rows).toEqual([{ kind: "hunk", text: "@@ -7,2 +7,2 @@" }, { kind: " ", text: "same", old: 7, next: 7 },
-      { kind: "-", text: "old", old: 8 }, { kind: "+", text: "new", next: 8 }, { kind: "note", text: "No newline at end of file" }]);
-    expect(parseDiff("Binary files a/a and b/a differ\n")[0].text).toContain("Binary");
-    expect(parseDiff("old mode 100644\nnew mode 100755\n").at(-1)?.text).toContain("mode changed");
-  });
 
   test("commit arguments preserve one complete multiline message verbatim", () => {
     const message = "\n  Keep spaces  \n\n# Keep this comment\nSecond detail\t \n\n";
@@ -90,10 +83,8 @@ describe("Changes real Git boundary", () => {
     const snapshot = await readSnapshot(context, exec);
     expect(snapshot.groups.staged[0].path).toBe("tracked.txt");
     expect(snapshot.groups.unstaged.find((f) => f.path === "tracked.txt")).toBeDefined();
-    expect((await readDiff(snapshot, snapshot.groups.staged[0], exec)).some((r) => r.kind === "+" && r.text === "index")).toBe(true);
     const untracked = snapshot.groups.unstaged.find((file) => file.path === path);
     if (!untracked) throw new Error("Expected literal untracked path");
-    expect((await readDiff(snapshot, untracked, exec)).some((r) => r.text === "literal")).toBe(true);
     expect((await perform(snapshot, { type: "commit", paths: [path], message: "Literal" }, exec)).ok).toBe(true);
     expect(must(root, "show", `HEAD:${path}`)).toBe("literal\n");
     expect(must(root, "show", "HEAD:tracked.txt")).toBe("base\n");
@@ -153,31 +144,18 @@ describe("Changes real Git boundary", () => {
     ]) expect((await perform(snapshot, action, exec)).ok).toBe(false);
   });
 
-  test("untracked symlinks never expose outside contents; empty, binary, and mode diffs are honest", async () => {
-    const context = repo(), outside = mkdtempSync(join(tmpdir(), "herdr-outside-")); roots.push(outside);
-    writeFileSync(join(outside, "secret"), "MUST_NOT_APPEAR_IN_PREVIEW\n");
-    symlinkSync(join(outside, "secret"), join(context.cwd, "link"));
-    writeFileSync(join(context.cwd, "empty"), ""); writeFileSync(join(context.cwd, "binary"), Buffer.from([0, 1, 2]));
-    chmodSync(join(context.cwd, "tracked.txt"), 0o755);
-    const snapshot = await readSnapshot(context, exec);
-    for (const file of snapshot.groups.unstaged) {
-      const rows = await readDiff(snapshot, file, exec), text = rows.map((r) => r.text).join("\n");
-      expect(text).not.toContain("MUST_NOT_APPEAR_IN_PREVIEW");
-      if (file.path === "link") expect(text).toContain("Symbolic link");
-      if (file.path === "binary") expect(text).toContain("Binary");
-      if (file.path === "empty") expect(text).toMatch(/empty|mode/);
-      if (file.path === "tracked.txt") expect(text).toContain("mode changed");
-    }
-  });
-
-  test("controller refreshes unchanged XY diffs and isolates drafts", async () => {
+  test("controller refreshes file status without preview reads and isolates drafts", async () => {
     const first = repo(), second = repo(); let context = first;
     writeFileSync(join(first.cwd, "tracked.txt"), "first edit\n");
-    const controller = new ChangesController({ exec, location: () => context });
+    const calls: string[][] = [];
+    const listing: Exec = async (program, argv, options) => { calls.push(argv); return exec(program, argv, options); };
+    const controller = new ChangesController({ exec: listing, location: () => context });
     const message = "Keep my draft\n\nWith its detail";
     await controller.refresh(); controller.setDraft(message);
     writeFileSync(join(first.cwd, "tracked.txt"), "second edit\n");
-    await controller.refresh(); expect(controller.diff?.some((r) => r.text === "second edit")).toBe(true);
+    await controller.refresh();
+    expect(controller.files().map((file) => file.path)).toEqual(["tracked.txt"]);
+    expect(calls.some((argv) => argv.includes("diff") || argv.includes("show") || argv.includes("cat-file") || argv.includes("ls-files"))).toBe(false);
     context = second; await controller.refresh(); expect(controller.draft().message).toBe("");
     context = first; await controller.refresh(); expect(controller.draft().message).toBe(message);
     controller.toggleFiles(["tracked.txt"]);
@@ -238,84 +216,41 @@ describe("Changes real Git boundary", () => {
     }
   });
 
-  test("same-file refresh keeps the displayed diff during status and diff reads", async () => {
+  test("refresh keeps filenames and inclusion stable until status arrives without loading content", async () => {
     const context = repo();
     writeFileSync(join(context.cwd, "tracked.txt"), "displayed edit\n");
-    const statusEntered = Promise.withResolvers<void>(), statusResume = Promise.withResolvers<void>();
-    const diffEntered = Promise.withResolvers<void>(), diffResume = Promise.withResolvers<void>();
-    let hold = false, report = () => {};
-    const delayed: Exec = async (program, argv, options) => {
-      const result = await exec(program, argv, options);
-      if (hold && argv.includes("status")) { statusEntered.resolve(); await statusResume.promise; }
-      if (hold && argv.includes("diff")) { hold = false; diffEntered.resolve(); await diffResume.promise; }
-      return result;
-    };
-    const controller = new ChangesController({ exec: delayed, location: () => context, changed: () => report() });
-    await controller.refresh();
-    const displayed = controller.diff, preserved: boolean[] = [];
-    expect(displayed?.some((row) => row.text === "displayed edit")).toBe(true);
-    report = () => preserved.push(controller.diff === displayed);
-    writeFileSync(join(context.cwd, "tracked.txt"), "replacement edit\n");
-    hold = true;
-    const refresh = controller.refresh();
-    try {
-      await statusEntered.promise;
-      expect(controller.loading).toBe(true);
-      expect(controller.diff).toBe(displayed);
-      statusResume.resolve();
-      await diffEntered.promise;
-      expect(controller.loading).toBe(true);
-      expect(controller.diff).toBe(displayed);
-      expect(preserved.length).toBeGreaterThan(0);
-      expect(preserved.every(Boolean)).toBe(true);
-      diffResume.resolve();
-      await refresh;
-      expect(controller.loading).toBe(false);
-      expect(controller.diff).not.toBe(displayed);
-      expect(controller.diff?.some((row) => row.text === "replacement edit")).toBe(true);
-      expect(controller.diff?.some((row) => row.text === "displayed edit")).toBe(false);
-    } finally {
-      statusResume.resolve(); diffResume.resolve(); await refresh; controller.close();
-    }
-  });
-
-  test("switching diff groups clears old rows and rejects a pending refresh result", async () => {
-    const context = repo();
-    writeFileSync(join(context.cwd, "tracked.txt"), "staged edit\n"); must(context.cwd, "add", "tracked.txt");
-    writeFileSync(join(context.cwd, "tracked.txt"), "unstaged edit\n");
     const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
     let hold = false;
+    const calls: string[][] = [];
     const delayed: Exec = async (program, argv, options) => {
+      calls.push(argv);
       const result = await exec(program, argv, options);
-      if (hold && argv.includes("diff") && !argv.includes("--cached")) {
-        hold = false; entered.resolve(); await resume.promise;
-      }
+      if (hold && argv.includes("status")) { hold = false; entered.resolve(); await resume.promise; }
       return result;
     };
     const controller = new ChangesController({ exec: delayed, location: () => context });
-    await controller.refresh();
-    expect(controller.selected?.group).toBe("unstaged");
+    await controller.refresh(); controller.toggleFiles(["tracked.txt"]);
+    writeFileSync(join(context.cwd, "arriving.txt"), "new file content\n");
     hold = true;
     const refresh = controller.refresh();
     try {
       await entered.promise;
-      const staged = controller.snapshot?.groups.staged[0];
-      if (!staged) throw new Error("Expected staged version of selected file");
-      const selection = controller.select(staged);
-      expect(controller.diff).toBeNull();
-      await selection;
-      expect(controller.selected?.group).toBe("staged");
-      expect(controller.diff?.some((row) => row.kind === "+" && row.text === "staged edit")).toBe(true);
-      const displayed = controller.diff;
+      expect(controller.loading).toBe(true);
+      expect(controller.files().map((file) => file.path)).toEqual(["tracked.txt"]);
+      expect(controller.checked.size).toBe(0);
       resume.resolve(); await refresh;
-      expect(controller.diff).toBe(displayed);
       expect(controller.loading).toBe(false);
-    } finally {
-      resume.resolve(); await refresh; controller.close();
-    }
+      expect(controller.files().map((file) => file.path).sort()).toEqual(["arriving.txt", "tracked.txt"]);
+      expect([...controller.checked]).toEqual(["arriving.txt"]);
+      const before = calls.length;
+      controller.toggleFiles(["tracked.txt"]);
+      expect(controller.checked.has("tracked.txt")).toBe(true);
+      expect(calls).toHaveLength(before);
+      expect(calls.some((argv) => argv.includes("diff") || argv.includes("show") || argv.includes("cat-file") || argv.includes("ls-files"))).toBe(false);
+    } finally { resume.resolve(); await refresh; controller.close(); }
   });
 
-  test("changing repository context clears the displayed diff before the new snapshot arrives", async () => {
+  test("changing repository context clears filenames and inclusion before the new snapshot arrives", async () => {
     const first = repo(), second = repo();
     let context = first, hold = false;
     writeFileSync(join(first.cwd, "tracked.txt"), "first repository edit\n");
@@ -327,17 +262,18 @@ describe("Changes real Git boundary", () => {
     };
     const controller = new ChangesController({ exec: delayed, location: () => context });
     await controller.refresh();
-    expect(controller.diff?.some((row) => row.text === "first repository edit")).toBe(true);
+    expect(controller.files().map((file) => file.path)).toEqual(["tracked.txt"]);
+    expect(controller.checked.has("tracked.txt")).toBe(true);
     context = second; hold = true;
     const refresh = controller.refresh();
     try {
       await entered.promise;
-      expect(controller.diff).toBeNull();
-      expect(controller.selected).toBeNull();
+      expect(controller.files()).toEqual([]);
+      expect(controller.checked.size).toBe(0);
       expect(controller.snapshot).toBeNull();
       resume.resolve(); await refresh;
       expect(controller.snapshot?.root).toBe(second.cwd);
-      expect(controller.diff).toBeNull();
+      expect(controller.files()).toEqual([]);
     } finally {
       resume.resolve(); await refresh; controller.close();
     }
@@ -427,36 +363,35 @@ describe("Changes live space context", () => {
       .toEqual({ space: "b", cwd: "/standalone", on: "other" });
   });
 
-  test("same repository across spaces reloads and cancels delayed status and diff results", async () => {
+  test("same repository across spaces reloads and cancels delayed status results", async () => {
     const base = repo();
     writeFileSync(join(base.cwd, "tracked.txt"), "old space edit\n");
-    let context: Location = { ...base, space: "a" }, hold: "status" | "diff" | null = null;
-    let entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    let context: Location = { ...base, space: "a" }, hold = false;
+    const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
     const delayed: Exec = async (program, argv, options) => {
       const result = await exec(program, argv, options);
-      if (hold && argv.includes(hold)) { hold = null; entered.resolve(); await resume.promise; }
+      if (hold && argv.includes("status")) { hold = false; entered.resolve(); await resume.promise; }
       return result;
     };
     const controller = new ChangesController({ exec: delayed, location: () => context });
     await controller.refresh(); controller.setDraft("Shared repository draft");
-    for (const phase of ["status", "diff"] as const) {
-      context = { ...base, space: "a" }; await controller.refresh();
-      hold = phase; entered = Promise.withResolvers<void>(); resume = Promise.withResolvers<void>();
-      const obsolete = controller.refresh();
-      try {
-        await entered.promise;
-        context = { ...base, space: "b" };
-        expect(controller.transition()).toBe(true);
-        expect(controller.snapshot).toBeNull(); expect(controller.diff).toBeNull(); expect(controller.error).toBeNull();
-        writeFileSync(join(base.cwd, "tracked.txt"), `new ${phase} edit\n`);
-        await controller.refresh();
-        const displayed = controller.diff, snapshot = controller.snapshot;
-        expect(displayed?.some((row) => row.text === `new ${phase} edit`)).toBe(true);
-        expect(controller.draft().message).toBe("Shared repository draft");
-        resume.resolve(); await obsolete;
-        expect(controller.snapshot).toBe(snapshot); expect(controller.diff).toBe(displayed); expect(controller.error).toBeNull();
-      } finally { resume.resolve(); await obsolete; }
-    }
+    controller.toggleFiles(["tracked.txt"]);
+    hold = true;
+    const obsolete = controller.refresh();
+    try {
+      await entered.promise;
+      context = { ...base, space: "b" };
+      expect(controller.transition()).toBe(true);
+      expect(controller.snapshot).toBeNull(); expect(controller.files()).toEqual([]); expect(controller.error).toBeNull();
+      writeFileSync(join(base.cwd, "arriving.txt"), "new space file\n");
+      await controller.refresh();
+      const snapshot = controller.snapshot;
+      expect(controller.files().map((file) => file.path).sort()).toEqual(["arriving.txt", "tracked.txt"]);
+      expect(controller.checked.size).toBe(2);
+      expect(controller.draft().message).toBe("Shared repository draft");
+      resume.resolve(); await obsolete;
+      expect(controller.snapshot).toBe(snapshot); expect(controller.checked.size).toBe(2); expect(controller.error).toBeNull();
+    } finally { resume.resolve(); await obsolete; }
     controller.close();
   });
 
@@ -470,10 +405,9 @@ describe("Changes live space context", () => {
     };
     const controller = new ChangesController({ exec: forwarded, location: () => context });
     await controller.refresh(); controller.setDraft("Machine A");
-    const old = controller.selected;
     context = { ...base, space: "b", on: "machine-b" };
     const before = calls.length;
-    await controller.select(old); await controller.mutate({ type: "stash" }); controller.toggleFiles(["tracked.txt"]); controller.setDraft("Stale input");
+    await controller.mutate({ type: "stash" }); controller.toggleFiles(["tracked.txt"]); controller.setDraft("Stale input");
     expect(calls).toHaveLength(before);
     await controller.refresh(); expect(controller.draft().message).toBe("");
     expect(controller.snapshot?.on).toBe("machine-b"); controller.setDraft("Machine B");
@@ -502,16 +436,17 @@ describe("Changes live space context", () => {
   });
 });
 
-test("Changes native scheduling defers input writes, avoids stable Git polling, and cancels close work", async () => {
+test("Changes native tree selection, constrained layout, and context scheduling stay independent of file previews", async () => {
   const first = repo(), second = repo();
   writeFileSync(join(first.cwd, "tracked.txt"), "first native edit\n");
   writeFileSync(join(second.cwd, "tracked.txt"), "second native edit\n");
   writeFileSync(join(first.cwd, "first-only.txt"), "first-only content\n");
   writeFileSync(join(second.cwd, "second-only.txt"), "second-only content\n");
+  mkdirSync(join(first.cwd, "src")); writeFileSync(join(first.cwd, "src", "nested.txt"), "nested private content\n");
   const script = `
     import { mock } from "bun:test";
     import assert from "node:assert/strict";
-    let rendering = false, queries = 0, drawn = [], focus;
+    let rendering = false, queries = 0, drawn = [], nodes = [], focus, activeHandle;
     const spaces = [
       { id: "a", active: true, folder: "/same-startup", machine: null, tabs: [{ id: "ta" }] },
       { id: "b", active: false, folder: "/same-startup", machine: null, tabs: [{ id: "tb" }] },
@@ -524,19 +459,24 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
     ];
     const choose = (id) => { const pane = panes.find(p => p.pane === "p" + id); focus = { space: id, tab: pane.tab, pane: pane.pane, cwd: pane.cwd }; };
     choose("a");
-    const element = () => {
-      const node = new Proxy({}, { get: (_, key) => {
+    const element = (kind = "div") => {
+      const data = { kind, styles: {}, children: [] };
+      const node = new Proxy(data, { get: (_, key) => {
         if (key === "then") return undefined;
+        if (key === "data") return data;
         if (key === "when") return (condition, apply) => { if (condition) apply(node); return node; };
-        if (key === "child") return (value) => { if (typeof value === "string") drawn.push(value); return node; };
-        return () => node;
+        if (key === "child") return (value) => {
+          data.children.push(value); if (value?.data) value.data.parent = node;
+          if (typeof value === "string") drawn.push(value); return node;
+        };
+        return (...args) => { data.styles[key] = args; return node; };
       } });
-      return node;
+      nodes.push(node); return node;
     };
     class Input {
       text = ""; events = new Map(); writes = [];
       static new() { return new Input(); }
-      set_auto_grow() {} set_soft_wrap() {}
+      set_soft_wrap() {}
       on(name, callback) { this.events.set(name, callback); }
       value() { return this.text; }
       set_value(value) {
@@ -545,19 +485,31 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
       }
       release() { assert.equal(rendering, false); }
     }
-    mock.module("gpui-kit", () => ({ View: class {}, div: element, svg: element, image: element }));
+    mock.module("gpui-kit", () => ({ View: class {}, div: () => element(), svg: () => element("svg"), image: () => element("image") }));
     mock.module("gpui-base", () => ({
-      h_flex: element, v_flex: element, Checkbox: { new: element }, TextareaState: Input, Textarea: { new: element },
+      h_flex: () => element("h_flex"), v_flex: () => element("v_flex"),
+      Checkbox: { new: (id) => element("checkbox").id(id) }, TextareaState: Input, Textarea: { new: () => element("textarea") },
       VirtualListScrollHandle: { new: () => ({ release() {}, scroll_to_item() {} }) },
-      Scrollbar: { vertical: element, horizontal: element },
-      v_virtual_list: (_id, count, _height, _key, render) => { render({ start: 0, end: count }); return element(); },
+      Scrollbar: { vertical: () => element("vertical-scrollbar"), horizontal: () => element("horizontal-scrollbar") },
+      v_virtual_list: (id, count, height, _key, render) => {
+        const list = element("virtual-list").id(id).row_height(height);
+        for (const row of render({ start: 0, end: count })) list.child(row);
+        return list;
+      },
     }));
     mock.module("herdr", () => ({
       spaces: () => spaces, panes: () => panes, focused: () => focus,
       settings: () => ({ zoom: 1 }),
-      theme: () => new Proxy({}, { get: () => "#112233" }), setShared() {},
+      theme: () => ({
+        background: "#112233", foreground: "#112233", accent: "#112233",
+        solid: "#112233", solid_foreground: "#112233", hover: "#112233",
+        input: "#112233", muted: "#112233", raised: "#112233", border: "#112233",
+        ansi1: "#112233", ansi2: "#112233",
+      }), setShared() {},
       exec: async (program, argv, options) => {
         assert.equal(rendering, false, "Git queried during render"); queries++;
+        assert(!argv.includes("diff") && !argv.includes("show") && !argv.includes("cat-file") && !argv.includes("ls-files"),
+          "listing and inclusion must not load file content");
         const result = Bun.spawnSync([program, ...argv], { cwd: options.cwd, env: ${JSON.stringify(env)} });
         return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
       },
@@ -568,7 +520,10 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
       list.push(timer); return timer;
     };
     const cx = {
-      focus_handle: () => ({ is_focused: () => false, focus() {} }),
+      focus_handle: () => {
+        const handle = { is_focused: () => activeHandle === handle, focus() { activeHandle = handle; } };
+        return handle;
+      },
       notify() { assert.equal(rendering, false, "native notify during render"); },
       spawn(callback) { assert.equal(rendering, false, "spawn starts action during render"); pending.push(callback()); },
       timer: { after: (_ms, callback) => register(once, callback), every: (_ms, callback) => register(repeat, callback) },
@@ -576,50 +531,125 @@ test("Changes native scheduling defers input writes, avoids stable Git polling, 
     const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
     const flush = async () => { for (const timer of once.splice(0)) if (!timer.cancelled) timer.callback(cx); await settle(); };
     const tick = async () => { for (const timer of repeat) if (!timer.cancelled) timer.callback(cx); await flush(); };
-    // Native mocks must register before dynamically importing this platform-only module.
+    // Register mocks before dynamically importing this platform-only module.
+    // Assertions inspect render structure, not native GPUI pixels.
     const { default: Changes } = await import(${JSON.stringify(new URL("../herdr/mods/t3-changes/main.js", import.meta.url).href)});
     const view = new Changes(); view.init({}, cx); await settle();
-    const render = () => { drawn = []; rendering = true; try { view.render(cx); } finally { rendering = false; } };
+    const render = () => {
+      drawn = []; nodes = []; rendering = true;
+      try { return view.render(cx); } finally { rendering = false; }
+    };
+    const byId = (suffix) => {
+      const node = nodes.find(node => node.data.styles.id?.[0] === view.id + suffix);
+      assert(node, "missing rendered control " + suffix); return node;
+    };
+    const emit = (node, name, event = {}) => {
+      let stopped = false;
+      const handler = node.data.styles[name]?.[0];
+      assert.equal(typeof handler, "function", "missing handler " + name);
+      handler(event, { ...cx, stop_propagation() { stopped = true; } });
+      return stopped;
+    };
+    const key = (value) => {
+      const tree = nodes.find(node => node.data.styles.accessibility_label?.[0]?.startsWith("Changed files."));
+      return emit(tree, "on_key_down", { key: value });
+    };
     assert.equal(view.controller.snapshot.space, "a");
     view.controller.setDraft("Draft from A");
+    for (const [width, height] of [[320, 300], [640, 480], [1440, 600]]) {
+      const before = queries, root = render();
+      emit(root, "on_size_change", { width, height });
+      const sized = render(), [column, footer] = sized.data.children;
+      assert.equal(column.data.kind, "v_flex"); assert.deepEqual(column.data.styles.w_full, []);
+      assert.deepEqual(column.data.styles.flex_1, []); assert.deepEqual(column.data.styles.min_h, [0]);
+      assert.equal(column.data.styles.h_full, undefined, "list must not claim the footer's height");
+      assert.equal(column.data.styles.w, undefined, "list must never use the former 48% split");
+      assert.equal(footer.data.kind, "v_flex"); assert.deepEqual(footer.data.styles.flex_none, []);
+      const tree = column.data.children.at(-1), viewport = tree.data.children[1];
+      assert.deepEqual(tree.data.styles.flex_1, []); assert.deepEqual(tree.data.styles.min_h, [0]);
+      assert.deepEqual(viewport.data.styles.flex_1, []); assert.deepEqual(viewport.data.styles.min_h, [0]);
+      assert.deepEqual(byId("-tree-x").data.styles.absolute, []);
+      assert.deepEqual(byId("-tree-x").data.styles.inset_0, []);
+      const available = height - footer.data.styles.h[0] - column.data.children[0].data.styles.h[0]
+        - tree.data.children[0].data.styles.h[0] - tree.data.children[2].data.styles.h[0];
+      assert(available >= 24, "normal sidebar height must reserve at least one complete file row");
+      assert(drawn.includes("tracked.txt") && drawn.includes("first-only.txt") && drawn.includes("nested.txt"));
+      assert(nodes.some(node => node.data.kind === "textarea"));
+      assert.equal(nodes.filter(node => node.data.kind === "virtual-list").length, 1);
+      assert(!nodes.some(node => String(node.data.styles.id?.[0]).includes("-diff")));
+      assert(!nodes.some(node => /preview/i.test(node.data.styles.accessibility_label?.[0] ?? "")));
+      for (const content of ["first native edit", "first-only content", "nested private content"]) assert(!drawn.includes(content));
+      assert.equal(queries, before, "resizing and rendering must not read Git");
+    }
+    const beforeSelection = queries;
+    emit(byId("-row-file-tracked.txt"), "on_click"); render();
+    assert.equal(view.controller.checked.has("tracked.txt"), false);
+    assert.equal(byId("-check-tracked.txt").data.styles.checked[0], false);
+    key("enter"); render(); assert.equal(view.controller.checked.has("tracked.txt"), true);
+    key("space"); render(); assert.equal(view.controller.checked.has("tracked.txt"), false);
+    const box = byId("-check-tracked.txt");
+    let stopped = false;
+    box.data.styles.on_mouse_down[1]({}, { ...cx, stop_propagation() { stopped = true; } });
+    assert(stopped, "checkbox mouse down must not focus or activate its row");
+    emit(box, "on_change", true);
+    if (!emit(box, "on_click")) emit(byId("-row-file-tracked.txt"), "on_click");
+    render(); assert.equal(view.controller.checked.has("tracked.txt"), true, "checkbox click must toggle exactly once");
+    assert.equal(byId("-check-tracked.txt").data.styles.checked[0], true);
+    const focusedRow = byId("-row-file-tracked.txt");
+    assert.equal(focusedRow.data.styles.border_color[0], "#112233", "keyboard focus must retain a ring");
+    assert.equal(focusedRow.data.styles.bg[0], "#1122331f", "included rows must show checked selection styling");
+    emit(byId("-row-folder-src"), "on_click"); render(); assert(!drawn.includes("nested.txt"));
+    key("enter"); render(); assert(drawn.includes("nested.txt"));
+    emit(byId("-folder-src"), "on_change", false); render(); assert(!view.controller.checked.has("src/nested.txt"));
+    emit(byId("-folder-src"), "on_change", true); render(); assert(view.controller.checked.has("src/nested.txt"));
+    emit(byId("-all"), "on_change", false); render(); assert.equal(view.controller.checked.size, 0);
+    emit(byId("-all"), "on_change", true); render(); assert.equal(view.controller.checked.size, 3);
+    view.controller.busy = true; emit(byId("-row-file-tracked.txt"), "on_click");
+    assert(view.controller.checked.has("tracked.txt")); view.controller.busy = false;
+    assert.equal(queries, beforeSelection, "all inclusion interactions must remain content-free");
     const initialQueries = queries;
     for (let i = 0; i < 12; i++) { render(); await tick(); }
     assert.equal(queries, initialQueries, "stable focus must not poll Git");
-    view.controller.error = "Old context error";
-    choose("b");
+    view.controller.error = "Old context error"; choose("b");
     const beforeSwitch = queries, beforeWrites = view.messageState.writes.length;
     render();
     assert.equal(queries, beforeSwitch); assert.equal(view.messageState.writes.length, beforeWrites);
-    assert.equal(view.controller.snapshot, null); assert.equal(view.controller.diff, null);
-    assert.equal(drawn.includes("first native edit"), false);
-    assert.equal(drawn.includes("first-only.txt"), false);
-    assert.equal(drawn.includes("Old context error"), false);
-    await flush();
-    assert.equal(view.controller.snapshot.space, "b");
-    assert.equal(view.messageState.value(), "");
-    assert(view.controller.diff.some(row => row.text === "second native edit"));
+    assert.equal(view.controller.snapshot, null); assert.equal(view.controller.checked.size, 0);
+    assert(!drawn.includes("first-only.txt") && !drawn.includes("Old context error"));
+    await flush(); render();
+    assert.equal(view.controller.snapshot.space, "b"); assert.equal(view.messageState.value(), "");
+    assert(drawn.includes("second-only.txt") && drawn.includes("tracked.txt")); assert(!drawn.includes("second native edit"));
     choose("c"); render(); await flush();
     assert.equal(view.controller.snapshot.space, "c");
     assert.equal(view.messageState.value(), "Draft from A", "draft scope remains machine/repository");
     choose("a"); const beforeSameRepo = queries; render(); await flush();
-    assert.equal(view.controller.snapshot.space, "a");
-    assert(queries > beforeSameRepo, "same cwd with another space must reload");
+    assert.equal(view.controller.snapshot.space, "a"); assert(queries > beforeSameRepo, "another space must reload");
     const stableQueries = queries;
     for (let i = 0; i < 12; i++) { render(); await tick(); }
     assert.equal(queries, stableQueries);
-    await view.controller.refresh(); assert(queries > stableQueries, "manual Refresh must read Git");
-    const paths = view.controller.files().map(file => file.path);
-    view.controller.toggleFiles(paths); assert.equal(view.controller.checked.size, 0);
-    view.controller.toggleFiles(paths); assert.equal(view.controller.checked.size, 2);
+    render(); emit(byId("-refresh"), "on_click"); await settle();
+    assert(queries > stableQueries, "manual Refresh must read Git");
+    render(); emit(byId("-all"), "on_change", false); render();
+    emit(byId("-row-file-tracked.txt"), "on_click"); render();
+    assert.deepEqual([...view.controller.checked], ["tracked.txt"]);
+    view.messageState.text = "Native selected commit";
+    view.messageState.events.get("change")({}, cx); render();
+    emit(byId("-commit"), "on_click"); await settle(); render();
+    assert.equal(view.controller.error, null);
+    assert(drawn.includes("first-only.txt") && drawn.includes("nested.txt") && !drawn.includes("tracked.txt"));
+    assert.equal(view.messageState.value(), "");
     choose("b"); render();
     const beforeClose = queries; view.close(); await flush(); await tick();
     assert.equal(queries, beforeClose, "closed view must cancel pending context work");
     assert(repeat.every(timer => timer.cancelled));
-    console.log("Changes native context scheduling passed");
+    console.log("Changes native tree and scheduling passed");
   `;
-  // Bun module mocks stay inside this child process and cannot contaminate other suites.
   const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
-  expect(stdout).toContain("Changes native context scheduling passed");
+  expect(stdout).toContain("Changes native tree and scheduling passed");
+  expect(must(first.cwd, "show", "HEAD:tracked.txt")).toBe("first native edit\n");
+  expect(git(first.cwd, "show", "HEAD:first-only.txt").code).not.toBe(0);
+  expect(readFileSync(join(first.cwd, "first-only.txt"), "utf8")).toBe("first-only content\n");
+  expect(readFileSync(join(first.cwd, "src", "nested.txt"), "utf8")).toBe("nested private content\n");
 }, 30_000);

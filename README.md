@@ -214,6 +214,7 @@ Remote branches also group beneath their remote name, such as `origin`.
 
 Use **Pin** or **Unpin** beside a branch, or in its context menu, to update **Pinned**.
 Pins persist per machine and repository, keeping local and remote refs distinct.
+Missing pin preferences start with an empty **Pinned** folder without an error.
 Pinning does not remove a branch from its original folder.
 Selecting a branch does not check it out or change the repository.
 
@@ -249,7 +250,12 @@ Preserve the `branches` block ID and its `t3-branches` content mod.
 Native Branches rendering, contrast across themes, and platform keyboard behavior still require verification in Herdr App.
 Mock-native control harnesses exercise handlers, not pixels or real-app layout.
 
-Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository. All changed files appear once in a directory tree. Check files individually, check a folder's descendants, or select all files. Selecting a row previews its diff in wide panels. Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page.
+Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository.
+All changed files appear once in a directory tree.
+Check files individually, check a folder's descendants, or select all files.
+Clicking a file row toggles its inclusion in the commit.
+Changes contains the file list and commit editor, without a diff preview at any panel width.
+Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page.
 
 Use **Refresh** to reload external edits. Use **Stash selected** to stash checked files, including checked untracked files. Use **Rollback selected** to discard checked changes after confirmation. Rollback restores tracked files to HEAD and removes selected new files. Unchecked files remain untouched. Resolve conflicts outside Changes before using these actions.
 
@@ -259,17 +265,32 @@ Enter a multiline **Commit message** in the large bottom editor. **Commit** reco
 
 Check **Amend** to load HEAD's changed files, already checked, and its commit message. **Commit** then rewrites HEAD instead of adding a commit. Existing HEAD contents remain the amendment's baseline. Unchecking a previous-only file does not remove that file's changes from HEAD. Checkboxes choose additional working-tree changes; amend also supports message-only changes. Unchecking **Amend** restores the normal commit draft and removes previous-only files from the list. Amend requires an existing commit.
 
-Changes keeps T3 Files' compact rows, file-type icons, expandable folders, and status badges. The tree supports horizontal and vertical scrolling. Long filenames remain readable through horizontal scrolling rather than permanent truncation. Wide panels retain the diff preview beside the tree. Narrow panels prioritize the tree and keep the commit editor below it.
+Changes keeps T3 Files' compact rows, file-type icons, expandable folders, and status badges.
+The tree supports horizontal and vertical scrolling.
+Long filenames remain readable through horizontal scrolling rather than permanent truncation.
+The file list fills the panel width, with the commit editor below.
 
 Changes refreshes when opened, after mutations, and when the focused space or repository changes. Switching spaces reloads even when both spaces use the same machine and directory. Drafts remain scoped to machine and repository. Refresh preserves same-context file selections and selects newly discovered files. Changes does not poll Git or refresh from Git Graph notifications. Progress and errors remain visible. The bottom editor supports multiline text and internal scrolling.
 
-Keyboard users can Tab through controls and the native message field. Enter and Shift+Enter insert newlines; only explicit button activation submits a commit. In the tree, arrow keys navigate, Enter previews or expands, and Space toggles inclusion. Left and Right collapse and expand folders. Failed commits retain the draft. Successful local commits clear only an unchanged draft, preserving text entered while Git hooks run.
+Keyboard users can Tab through controls and the native message field.
+Enter and Shift+Enter insert newlines; only explicit button activation submits a commit.
+In the tree, arrow keys navigate, Enter toggles file inclusion or expands folders, and Space toggles inclusion.
+Left and Right collapse and expand folders.
+Failed commits retain the draft.
+Successful local commits clear only an unchanged draft, preserving text entered while Git hooks run.
 
 **Permissions and effects:** Review the imported mod code before using it. T3 mods run Git, shell, and `hc` commands; they inspect local or remote space files and repositories. They write agent labels and caches, and Actions runs user-defined shell commands. Machine Connect can remove and add an `hc` machine; file actions can open local files or use the clipboard. On macOS, zoom changes can rewrite the installed layout. T3 upstream reports no network requests by the layout itself. See upstream [What it runs](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/README.md#what-it-runs) for details.
 
 Git Graph runs Git on the focused repository's machine and reads untracked files for diffs. Manygit scans folders and periodically checks listed repositories; Git status can run repository-configured clean filters. Fetch, pull, push, and remote branch deletion can access the network. Git actions can change repositories, including destructive resets; review each action's confirmation. Local branch checkout and Fetch run without confirmation.
 
-Changes runs Git through argument arrays on the focused repository's machine, including remote machines. Status and diff reads disable optional index locks, external diff drivers, and textconv. Untracked previews use Git's no-index diff. Symbolic links show their targets, not the targets' contents. Git may run configured clean filters, commit hooks, and signing programs. Commit changes local history; amend rewrites HEAD. Stash changes the working tree and index. Confirmed rollback discards selected changes. Push can access the network and requires the repository's existing authentication.
+Changes runs Git through argument arrays on the focused repository's machine, including remote machines.
+Status reads disable optional index locks and fsmonitor.
+Changes does not load file-content diffs.
+Git may run configured clean filters, commit hooks, and signing programs.
+Commit changes local history; amend rewrites HEAD.
+Stash changes the working tree and index.
+Confirmed rollback discards selected changes.
+Push can access the network and requires the repository's existing authentication.
 
 Changes checks HEAD and branch before mutations and rejects actions after focus changes. External Git operations can still race after preflight. Finish concurrent Git work before mutating the same checkout. HEAD changes invalidate amend data. Git failures retain the draft unless the local commit already succeeded before a push failure. Changes publishes mutation notifications so Git Graph can refresh. Reconcile and recopy `herdr/mods/t3-changes/` to install updates; no separate build step is required.
 

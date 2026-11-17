@@ -1,11 +1,11 @@
-import { contextKey, repositoryKey, selectionKey, unifiedFiles } from "./model.js";
-import { readSnapshot, readPrevious, readDiff, perform } from "./git.js";
+import { contextKey, repositoryKey, unifiedFiles } from "./model.js";
+import { readSnapshot, readPrevious, perform } from "./git.js";
 
 // Effects live here and in git.js; native rendering only issues controller actions.
 export class ChangesController {
   constructor({ exec, location, changed = () => {}, publish = () => {} }) {
-    Object.assign(this, { exec, location, changed, publish, snapshot: null, selected: null, diff: null, error: null,
-      loading: false, busy: false, closed: false, generation: 0, diffGeneration: 0, drafts: new Map(),
+    Object.assign(this, { exec, location, changed, publish, snapshot: null, error: null,
+      loading: false, busy: false, closed: false, generation: 0, drafts: new Map(),
       checked: new Set(), known: new Set(), normalChecked: null, amend: false, previous: null, amendDraft: null, amendGeneration: 0, amendLoading: false });
   }
 
@@ -14,9 +14,9 @@ export class ChangesController {
     const key = contextKey(context);
     if (this.closed || key === this.context) return false;
     this.clearAmend();
-    this.context = key; this.snapshot = null; this.selected = null; this.diff = null; this.error = null;
+    this.context = key; this.snapshot = null; this.error = null;
     this.checked = new Set(); this.known = new Set();
-    this.diffGeneration++; this.generation++; this.loading = false;
+    this.generation++; this.loading = false;
     return true;
   }
 
@@ -52,7 +52,6 @@ export class ChangesController {
       this.checked = new Set([...selection].filter((path) => normal.has(path)));
       if (pending) this.loading = false;
       this.changed();
-      if (this.selected?.group === "previous") await this.select(this.files()[0] ?? null);
       return;
     }
     if (this.loading || this.amend) return;
@@ -68,7 +67,6 @@ export class ChangesController {
       this.previous = previous; this.amend = true; this.amendDraft = { message: previous.message };
       this.checked = new Set([...this.checked, ...previous.files.map((file) => file.path)]);
       this.changed();
-      if (!this.selected) await this.select(this.files()[0] ?? null);
     } catch (error) {
       if (current()) this.error = String(error?.message ?? error);
     } finally {
@@ -104,48 +102,25 @@ export class ChangesController {
       if (!current()) return;
       const previousSnapshot = this.snapshot;
       const changedRepository = previousSnapshot && repositoryKey(previousSnapshot) !== repositoryKey(snapshot);
-      if (changedRepository) { this.diff = null; this.checked = new Set(); this.known = new Set(); }
+      if (changedRepository) { this.checked = new Set(); this.known = new Set(); }
       if (previousSnapshot && (changedRepository || previousSnapshot.head !== snapshot.head || previousSnapshot.branch !== snapshot.branch)) {
         if (this.normalChecked) this.checked = new Set(this.normalChecked);
         this.clearAmend();
       }
       this.snapshot = snapshot;
       const normal = new Set(unifiedFiles(snapshot).map((file) => file.path));
-      const files = this.files(), available = new Set(files.map((file) => file.path));
+      const available = new Set(this.files().map((file) => file.path));
       this.checked = new Set([...this.checked].filter((path) => available.has(path)));
       for (const path of normal) if (!this.known.has(path)) {
         this.checked.add(path);
         if (this.normalChecked) this.normalChecked.add(path);
       }
       this.known = normal;
-      const selected = files.find((file) => selectionKey(file) === selectionKey(this.selected))
-        ?? files.find((file) => file.path === this.selected?.path) ?? files[0] ?? null;
-      // Reload unchanged selections without blanking the displayed diff.
-      await this.select(selected);
     } catch (error) {
-      if (current()) { this.error = String(error?.message ?? error); this.diff = null; }
+      if (current()) this.error = String(error?.message ?? error);
     } finally {
       if (this.generation === generation) { this.loading = false; if (!this.closed) this.changed(); }
     }
-  }
-
-  async select(file) {
-    if (this.closed || !this.snapshot || contextKey(this.location()) !== this.context) return;
-    const sameFile = file && selectionKey(file) === selectionKey(this.selected);
-    this.selected = file;
-    const generation = ++this.diffGeneration, context = this.context, snapshot = this.snapshot;
-    if (!sameFile) this.diff = null;
-    this.changed();
-    if (!file || !snapshot) return;
-    try {
-      const diff = await readDiff(snapshot, file, this.exec);
-      if (!this.closed && this.diffGeneration === generation && this.context === context && contextKey(this.location()) === context) this.diff = diff;
-    } catch (error) {
-      if (!this.closed && this.diffGeneration === generation && this.context === context && contextKey(this.location()) === context) {
-        this.diff = [{ kind: "note", text: `Can't show this diff: ${error?.message ?? error}` }];
-      }
-    }
-    if (!this.closed) this.changed();
   }
 
   async mutate(action) {
@@ -175,5 +150,5 @@ export class ChangesController {
     }
   }
 
-  close() { this.closed = true; this.generation++; this.diffGeneration++; this.amendGeneration++; }
+  close() { this.closed = true; this.generation++; this.amendGeneration++; }
 }

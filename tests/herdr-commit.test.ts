@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChangesController } from "../herdr/mods/t3-changes/controller.js";
-import { perform, readDiff, readPrevious, readSnapshot, type Exec } from "../herdr/mods/t3-changes/git.js";
+import { perform, readPrevious, readSnapshot, type Exec } from "../herdr/mods/t3-changes/git.js";
 import type { Location } from "../herdr/mods/t3-changes/model.js";
 
 const roots: string[] = [];
@@ -90,7 +90,6 @@ describe("amend state and history", () => {
       await controller.refresh(); controller.setDraft("Normal draft"); await controller.setAmend(true);
       expect(controller.amend).toBe(true); expect(controller.draft().message).toBe(original);
       expect(controller.files().map((file) => file.path)).toEqual(["root.txt"]); expect(controller.checked.has("root.txt")).toBe(true);
-      expect(controller.diff?.some((row) => row.text === "root content")).toBe(true);
       controller.toggleFiles(["root.txt"]);
       const replacement = "\n  Rewritten root\n\n# preserve\n\n";
       controller.setDraft(replacement); await controller.mutate({ type: "commit" });
@@ -108,7 +107,6 @@ describe("amend state and history", () => {
       await controller.refresh(); await controller.setAmend(true);
       const deleted = controller.files().find((file) => file.path === "chosen.txt");
       expect(deleted?.status).toBe("D"); expect(controller.checked.has("chosen.txt")).toBe(true);
-      expect((await readDiff(controller.snapshot!, deleted!, exec)).some((row) => row.kind === "-")).toBe(true);
       controller.setDraft("Still deleted"); await controller.mutate({ type: "commit" });
       expect(controller.error).toBeNull(); expect(must(root, "rev-list", "--count", "HEAD").trim()).toBe("2");
       expect(git(root, "show", "HEAD:chosen.txt").code).not.toBe(0);
@@ -132,7 +130,7 @@ describe("amend state and history", () => {
     } finally { controller.close(); }
   });
 
-  test("merge amend previews compare the first parent", async () => {
+  test("merge amend lists previous changes against the first parent", async () => {
     const context = repo(), root = context.cwd;
     must(root, "switch", "-c", "side"); writeFileSync(join(root, "side.txt"), "side\n"); must(root, "add", "."); must(root, "commit", "-m", "Side");
     must(root, "switch", "main"); writeFileSync(join(root, "main.txt"), "main\n"); must(root, "add", "."); must(root, "commit", "-m", "Main");
