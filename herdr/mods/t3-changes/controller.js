@@ -65,7 +65,6 @@ export class ChangesController {
       if (!current()) return;
       this.normalChecked = new Set(this.checked);
       this.previous = previous; this.amend = true; this.amendDraft = { message: previous.message };
-      this.checked = new Set([...this.checked, ...previous.files.map((file) => file.path)]);
       this.changed();
     } catch (error) {
       if (current()) this.error = String(error?.message ?? error);
@@ -111,10 +110,6 @@ export class ChangesController {
       const normal = new Set(unifiedFiles(snapshot).map((file) => file.path));
       const available = new Set(this.files().map((file) => file.path));
       this.checked = new Set([...this.checked].filter((path) => available.has(path)));
-      for (const path of normal) if (!this.known.has(path)) {
-        this.checked.add(path);
-        if (this.normalChecked) this.normalChecked.add(path);
-      }
       this.known = normal;
     } catch (error) {
       if (current()) this.error = String(error?.message ?? error);

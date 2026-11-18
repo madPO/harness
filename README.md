@@ -249,6 +249,8 @@ Install updates by copying `t3-branches/`, updating `t3-chrome/`, and merging th
 Preserve the `branches` block ID and its `t3-branches` content mod.
 Native Branches rendering, contrast across themes, and platform keyboard behavior still require verification in Herdr App.
 Mock-native control harnesses exercise handlers, not pixels or real-app layout.
+Native accessibility roles use GPUI's snake_case names, including `tree_item` and `menu_item`, not browser ARIA spellings.
+The [runtime role table](https://github.com/herdrdev/herdr-app/blob/8e1208deeff2a24441a192974e648c6fa0c5053c/vendor/gpui-kit/crates/shell/src/a11y.rs) defines accepted names.
 
 Branches and Changes render interactive rows during the normal view render, using T3 Files' visible-window list approach.
 Herdr forbids registering row handlers inside native virtual-list callbacks, which execute during layout.
@@ -269,14 +271,29 @@ Enter a multiline **Commit message** in the large bottom editor. **Commit** reco
 
 **Commit and push** commits first, then runs a normal push. If push fails, the local commit remains successful. Fix the remote or tracking configuration, then push through Git Graph or your terminal. Do not commit again merely to retry the push. Changes never force-pushes, including after amend.
 
-Check **Amend** to load HEAD's changed files, already checked, and its commit message. **Commit** then rewrites HEAD instead of adding a commit. Existing HEAD contents remain the amendment's baseline. Unchecking a previous-only file does not remove that file's changes from HEAD. Checkboxes choose additional working-tree changes; amend also supports message-only changes. Unchecking **Amend** restores the normal commit draft and removes previous-only files from the list. Amend requires an existing commit.
+Check **Amend** to load HEAD's changed files and its commit message.
+Enabling **Amend** preserves explicit selections and leaves additional files unchecked.
+**Commit** then rewrites HEAD instead of adding a commit.
+Existing HEAD contents remain the amendment's baseline.
+Unchecking a previous-only file does not remove that file's changes from HEAD.
+Checkboxes choose additional working-tree changes; amend also supports message-only changes.
+Unchecking **Amend** restores the normal commit draft and removes previous-only files from the list.
+Amend requires an existing commit.
 
 Changes keeps T3 Files' compact rows, file-type icons, expandable folders, and status badges.
 The tree supports horizontal and vertical scrolling.
 Long filenames remain readable through horizontal scrolling rather than permanent truncation.
 The file list fills the panel width, with the commit editor below.
 
-Changes refreshes when opened, after mutations, and when the focused space or repository changes. Switching spaces reloads even when both spaces use the same machine and directory. Drafts remain scoped to machine and repository. Refresh preserves same-context file selections and selects newly discovered files. Changes does not poll Git or refresh from Git Graph notifications. Progress and errors remain visible. The bottom editor supports multiline text and internal scrolling.
+Files start unchecked, including staged files and newly discovered changes.
+Select files explicitly before committing, stashing, or rolling back.
+Changes refreshes when opened, after mutations, and when the focused space or repository changes.
+Switching spaces reloads even when both spaces use the same machine and directory.
+Drafts remain scoped to machine and repository.
+Refresh preserves explicit selections for files still listed and leaves new files unchecked.
+Changes does not poll Git or refresh from Git Graph notifications.
+Progress and errors remain visible.
+The bottom editor supports multiline text and internal scrolling.
 
 Keyboard users can Tab through controls and the native message field.
 Enter and Shift+Enter insert newlines; only explicit button activation submits a commit.

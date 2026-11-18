@@ -376,9 +376,11 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     import { mock } from "bun:test";
     import assert from "node:assert/strict";
     const cwd = ${JSON.stringify(context.cwd)};
-    const values = new Map(), signals = new Map(), pending = [], overlays = [], ticks = [];
+    const values = new Map(), signals = new Map(), pending = [], overlays = [], closedOverlays = [], ticks = [];
     let missing, readError = null, writeError = null, drawn = [], controls = new Map();
-    let nodes = [], lazy = [], inLayout = false, focusedHandle, folder = cwd;
+    let nodes = [], lazy = [], inLayout = false, focusedHandle, folder = cwd, viewProps = {};
+    // Native gpui::Role names used by these controls, not browser ARIA spellings.
+    const nativeRoles = { alert: true, button: true, dialog: true, group: true, menu: true, menu_item: true, tree: true, tree_item: true };
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
       getItem(key) {
         if (readError) throw readError;
@@ -399,6 +401,10 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
         if (key === "children") return (values) => { data.children.push(...values); return node; };
         if (key === "id") return (value) => { data.id = value; return node; };
         if (key === "accessibility_label") return (value) => { data.label = value; return node; };
+        if (key === "role") return (value) => {
+          assert(Object.hasOwn(nativeRoles, value), "unknown native accessibility role: " + value);
+          data.styles.role = [value]; return node;
+        };
         if (String(key).startsWith("on_")) return (...args) => {
           assert.equal(inLayout, false, "native lazy rows cannot register " + String(key) + " during layout");
           const name = key === "on_mouse_down" ? key + ":" + args[0] : key;
@@ -432,11 +438,11 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     }));
     mock.module("herdr", () => ({
       spaces: () => [{ id: "first", active: true, folder, machine: null, tabs: [] }],
-      panes: () => [], focused: () => null, props: () => ({}),
+      panes: () => [], focused: () => null, props: () => viewProps,
       theme: () => new Proxy({}, { get: () => "#112233" }),
       settings: () => ({ zoom: 1 }),
       shared: (key) => signals.get(key), setShared: (key, value) => signals.set(key, value),
-      openOverlay: (overlay) => overlays.push(overlay), closeOverlay() {},
+      openOverlay: (overlay) => overlays.push(overlay), closeOverlay: (overlay) => closedOverlays.push(overlay),
       exec: async (program, argv, options) => {
         assert.equal(program, "git"); assert.equal(options.on, null);
         const result = Bun.spawnSync([program, ...argv], { cwd: options.cwd, env: ${JSON.stringify(env)} });
@@ -567,7 +573,7 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     assert(drawn.includes("142 branches"));
     assert(drawn.includes("topic"), "loaded nested branch names must render");
     assert(!drawn.includes("branch-139"), "unmeasured rendering must remain bounded");
-    assert(nodes.filter(node => node.styles.role?.[0] === "treeitem").length <= Math.ceil(2000 / 24));
+    assert(nodes.filter(node => node.styles.role?.[0] === "tree_item").length <= Math.ceil(2000 / 24));
     assert(nodes.some(node => node.id === part.id + "-tree-x" && "overflow_x_scroll" in node.styles));
     assert(nodes.some(node => node.id === "scrollbar:" + part.id + "-tree-x"));
     assert("size_full" in list().styles, "the list must use the full available tree viewport");
@@ -581,7 +587,7 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     assert.equal(part.listHeight[listId], 144);
     assert(drawn.includes("branch-139"), "measurement must reveal the offscreen keyboard target");
     assert.equal(part.treeReveal, null, "reveal must be consumed after a measured render");
-    assert.equal(nodes.filter(node => node.styles.role?.[0] === "treeitem").length, 6);
+    assert.equal(nodes.filter(node => node.styles.role?.[0] === "tree_item").length, 6);
     assert(nodes.some(node => node.label === "local branch branch-139"
       && node.children.some(child => child?.data?.styles.border?.[0] === 2)), "keyboard focus must remain visible");
     keyDown("space");
@@ -629,7 +635,7 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     assert(part.controller.pins.has("refs/heads/feature/nested/topic"), "the Pin control must support keyboard activation");
     assert(part.handles.tree.is_focused(), "pinning must return keyboard focus to the tree");
     keyDown("space");
-    const target = nodes.find(node => node.styles.role?.[0] === "treeitem"
+    const target = nodes.find(node => node.styles.role?.[0] === "tree_item"
       && node.label?.startsWith("local branch feature/nested/topic"));
     assert(target?.handlers["on_mouse_down:right"], "visible branch rows must expose secondary click");
     target.handlers["on_mouse_down:right"]({}, cx); await settle(); render(view);
@@ -641,7 +647,19 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     keyDown("end"); keyDown("up"); keyDown("enter");
     assert.equal(part.selectedRef, "refs/heads/main");
     assert.equal(fixtureGit(["symbolic-ref", "--short", "HEAD"]), "main", "selection must not change Git checkout");
-    folder = null; ticks.at(-1)(cx); render(view);
+    const ownerTick = ticks.at(-1);
+    viewProps = { ...overlays.at(-1).props, overlay: "branch-actions-test" };
+    const menuView = new BranchesView(); menuView.init({}, cx); render(menuView);
+    const menuItems = nodes.filter(node => node.styles.role?.[0] === "menu_item");
+    assert(menuItems.some(node => node.label === "Copy branch name"), "branch action labels must render with native menu item roles");
+    const menuRoot = nodes.find(node => node.styles.role?.[0] === "menu");
+    menuRoot.handlers.on_key_down({ key: "down" }, cx);
+    assert.equal(menuView.part.at, 1, "rendered branch actions must retain keyboard navigation");
+    menuRoot.handlers.on_key_down({ key: "escape" }, cx);
+    assert.deepEqual(closedOverlays, ["branch-actions-test"], "Escape must close the rendered branch menu");
+    menuView.close(); viewProps = {};
+    part.handles.tree.focus(); render(view);
+    folder = null; ownerTick(cx); render(view);
     assert.equal(part.treeReveal, null);
     assert.equal(part.scrollTop[listId], 0, "context transitions must reset the previous repository's scroll position");
     assert.equal(part.selectedRef, null);

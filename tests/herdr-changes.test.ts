@@ -158,7 +158,6 @@ describe("Changes real Git boundary", () => {
     expect(calls.some((argv) => argv.includes("diff") || argv.includes("show") || argv.includes("cat-file") || argv.includes("ls-files"))).toBe(false);
     context = second; await controller.refresh(); expect(controller.draft().message).toBe("");
     context = first; await controller.refresh(); expect(controller.draft().message).toBe(message);
-    controller.toggleFiles(["tracked.txt"]);
     await controller.mutate({ type: "commit" }); expect(controller.draft().message).toBe(message);
     expect(controller.error).not.toBeNull();
     controller.toggleFiles(["tracked.txt"]); await controller.mutate({ type: "commit" });
@@ -173,7 +172,7 @@ describe("Changes real Git boundary", () => {
     writeFileSync(hook, "#!/bin/sh\necho 'Hook rejected this commit' >&2\nexit 1\n"); chmodSync(hook, 0o755);
     const controller = new ChangesController({ exec, location: () => context });
     try {
-      await controller.refresh(); controller.setDraft(message);
+      await controller.refresh(); controller.toggleFiles(["tracked.txt"]); controller.setDraft(message);
       const before = must(root, "rev-parse", "HEAD");
       await controller.mutate({ type: "commit" });
       expect(controller.error).toContain("Hook rejected this commit");
@@ -199,6 +198,7 @@ describe("Changes real Git boundary", () => {
     };
     const controller = new ChangesController({ exec: delayed, location: () => context });
     await controller.refresh();
+    controller.toggleFiles(["tracked.txt"]);
     const committed = "Original message\n\nOriginal detail\n", edited = "Next message\n\nTyped during a hook\n";
     controller.setDraft(committed);
     const pending = controller.mutate({ type: "commit" });
@@ -237,14 +237,15 @@ describe("Changes real Git boundary", () => {
       await entered.promise;
       expect(controller.loading).toBe(true);
       expect(controller.files().map((file) => file.path)).toEqual(["tracked.txt"]);
-      expect(controller.checked.size).toBe(0);
+      expect([...controller.checked]).toEqual(["tracked.txt"]);
       resume.resolve(); await refresh;
       expect(controller.loading).toBe(false);
       expect(controller.files().map((file) => file.path).sort()).toEqual(["arriving.txt", "tracked.txt"]);
-      expect([...controller.checked]).toEqual(["arriving.txt"]);
+      expect([...controller.checked]).toEqual(["tracked.txt"]);
+      expect(controller.checked.has("arriving.txt")).toBe(false);
       const before = calls.length;
-      controller.toggleFiles(["tracked.txt"]);
-      expect(controller.checked.has("tracked.txt")).toBe(true);
+      controller.toggleFiles(["arriving.txt"]);
+      expect(controller.checked.has("arriving.txt")).toBe(true);
       expect(calls).toHaveLength(before);
       expect(calls.some((argv) => argv.includes("diff") || argv.includes("show") || argv.includes("cat-file") || argv.includes("ls-files"))).toBe(false);
     } finally { resume.resolve(); await refresh; controller.close(); }
@@ -262,6 +263,7 @@ describe("Changes real Git boundary", () => {
     };
     const controller = new ChangesController({ exec: delayed, location: () => context });
     await controller.refresh();
+    controller.toggleFiles(["tracked.txt"]);
     expect(controller.files().map((file) => file.path)).toEqual(["tracked.txt"]);
     expect(controller.checked.has("tracked.txt")).toBe(true);
     context = second; hold = true;
@@ -316,10 +318,11 @@ describe("Changes real Git boundary", () => {
     rmSync(join(context.cwd, "tracked.txt")); writeFileSync(join(context.cwd, "new.txt"), "new\n");
     const controller = new ChangesController({ exec, location: () => context });
     await controller.refresh();
-    expect(controller.checked.size).toBe(2);
+    expect(controller.checked.size).toBe(0);
     const paths = controller.files().map((file) => file.path);
-    controller.toggleFiles(paths); expect(controller.checked.size).toBe(0);
     controller.toggleFiles(paths); expect(controller.checked.size).toBe(2);
+    controller.toggleFiles(paths); expect(controller.checked.size).toBe(0);
+    controller.toggleFiles(paths);
     controller.setDraft("Selected changes"); await controller.mutate({ type: "commit" });
     expect(controller.snapshot?.files).toHaveLength(0); controller.close();
   });
@@ -387,10 +390,10 @@ describe("Changes live space context", () => {
       await controller.refresh();
       const snapshot = controller.snapshot;
       expect(controller.files().map((file) => file.path).sort()).toEqual(["arriving.txt", "tracked.txt"]);
-      expect(controller.checked.size).toBe(2);
+      expect(controller.checked.size).toBe(0);
       expect(controller.draft().message).toBe("Shared repository draft");
       resume.resolve(); await obsolete;
-      expect(controller.snapshot).toBe(snapshot); expect(controller.checked.size).toBe(2); expect(controller.error).toBeNull();
+      expect(controller.snapshot).toBe(snapshot); expect(controller.checked.size).toBe(0); expect(controller.error).toBeNull();
     } finally { resume.resolve(); await obsolete; }
     controller.close();
   });
@@ -608,11 +611,16 @@ test("Changes native tree selection, constrained layout, and context scheduling 
       for (const content of ["first native edit", "first-only content", "nested private content"]) assert(!drawn.includes(content));
       assert.equal(queries, before, "resizing and rendering must not read Git");
     }
+    assert.equal(view.controller.checked.size, 0);
+    assert(drawn.includes("3 files · 0 selected"));
+    assert.equal(byId("-commit").data.styles.disabled[0], true, "a draft alone must not enable a normal commit");
     const beforeSelection = queries;
     emit(byId("-row-file-tracked.txt"), "on_click"); render();
-    assert.equal(view.controller.checked.has("tracked.txt"), false);
-    assert.equal(byId("-check-tracked.txt").data.styles.checked[0], false);
-    key("enter"); render(); assert.equal(view.controller.checked.has("tracked.txt"), true);
+    assert.equal(view.controller.checked.has("tracked.txt"), true);
+    assert.equal(byId("-check-tracked.txt").data.styles.checked[0], true);
+    assert.equal(byId("-commit").data.styles.disabled[0], false, "explicit file inclusion must enable a valid commit");
+    key("enter"); render(); assert.equal(view.controller.checked.has("tracked.txt"), false);
+    key("space"); render(); assert.equal(view.controller.checked.has("tracked.txt"), true);
     key("space"); render(); assert.equal(view.controller.checked.has("tracked.txt"), false);
     const box = byId("-check-tracked.txt");
     let stopped = false;
@@ -627,8 +635,9 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     assert.equal(focusedRow.data.styles.bg[0], "#1122331f", "included rows must show checked selection styling");
     emit(byId("-row-folder-src"), "on_click"); render(); assert(!drawn.includes("nested.txt"));
     key("enter"); render(); assert(drawn.includes("nested.txt"));
-    emit(byId("-folder-src"), "on_change", false); render(); assert(!view.controller.checked.has("src/nested.txt"));
     emit(byId("-folder-src"), "on_change", true); render(); assert(view.controller.checked.has("src/nested.txt"));
+    emit(byId("-folder-src"), "on_change", false); render(); assert(!view.controller.checked.has("src/nested.txt"));
+    emit(byId("-all"), "on_change", true); render(); assert.equal(view.controller.checked.size, 3);
     emit(byId("-all"), "on_change", false); render(); assert.equal(view.controller.checked.size, 0);
     emit(byId("-all"), "on_change", true); render(); assert.equal(view.controller.checked.size, 3);
     view.controller.busy = true; emit(byId("-row-file-tracked.txt"), "on_click");
@@ -637,6 +646,8 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     const many = Array.from({ length: 180 }, (_, i) => "many-" + String(i).padStart(3, "0") + ".txt");
     for (const path of many) await Bun.write(${JSON.stringify(first.cwd)} + "/" + path, "unselected fixture content\\n");
     await view.controller.refresh(); render();
+    assert.deepEqual([...view.controller.checked].sort(), ["first-only.txt", "src/nested.txt", "tracked.txt"],
+      "refresh must preserve explicit selections without including newly discovered files");
     emit(byId("-tree-y"), "on_size_change", { width: 640, height: 96 }); render();
     assert.equal(byId("-tree-y").data.children.length, 4, "only the measured visible window should build interactive rows");
     assert(!drawn.includes("many-179.txt") && !drawn.includes("tracked.txt"));
@@ -687,7 +698,7 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     assert.equal(queries, stableQueries);
     render(); emit(byId("-refresh"), "on_click"); await settle();
     assert(queries > stableQueries, "manual Refresh must read Git");
-    render(); emit(byId("-all"), "on_change", false); render();
+    render(); assert.equal(view.controller.checked.size, 0, "returning to a context must require fresh explicit selections");
     emit(byId("-row-file-tracked.txt"), "on_click"); render();
     assert.deepEqual([...view.controller.checked], ["tracked.txt"]);
     view.messageState.text = "Native selected commit";

@@ -251,7 +251,7 @@ class Branches {
     return h_flex().id(`${this.id}-row-${row.id}`).h(UI.row).mx(2).pl(UI.pad + row.depth * UI.level).pr(UI.pad)
       .gap(UI.gap).items_center().rounded(UI.radius).text_size(UI.text).relative()
       .when(on, (el) => el.bg(t.selected).font_medium()).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
-      .role("treeitem").accessibility_label(`${label}${on ? ", selected" : ""}`).cursor_pointer()
+      .role("tree_item").accessibility_label(`${label}${on ? ", selected" : ""}`).cursor_pointer()
       .on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = at; this.activate(row); cx.notify(); })
       .when(Boolean(branch), (el) => el.on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation(); this.openMenu(row, at, cx);

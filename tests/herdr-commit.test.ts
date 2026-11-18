@@ -48,7 +48,7 @@ describe("selected commit semantics", () => {
       await controller.refresh();
       expect(controller.files().filter((file) => file.path === "chosen.txt")).toHaveLength(1);
       expect(controller.files().find((file) => file.path === "chosen.txt")?.group).toBe("unstaged");
-      controller.toggleFiles(["other.txt"]); controller.setDraft("Selected commit");
+      controller.toggleFiles(["chosen.txt"]); controller.setDraft("Selected commit");
       await controller.mutate({ type: "commit" }); expect(controller.error).toBeNull();
       expect(must(root, "show", "HEAD:chosen.txt")).toBe("complete workingtree\n");
       expect(must(root, "show", "HEAD:other.txt")).toBe("other base\n");
@@ -68,15 +68,24 @@ describe("selected commit semantics", () => {
     expect((await readSnapshot(context, exec)).files.map((file) => file.path)).toEqual(["untouched.txt"]);
   });
 
-  test("selection survives refresh, includes arrivals, and resets across contexts", async () => {
+  test("selection is opt-in, survives refresh without arrivals, and resets across contexts", async () => {
     const base = repo(); let context: Location = { ...base, space: "a" };
     writeFileSync(join(base.cwd, "chosen.txt"), "dirty\n"); writeFileSync(join(base.cwd, "other.txt"), "dirty\n");
     const controller = new ChangesController({ exec, location: () => context });
     try {
-      await controller.refresh(); controller.toggleFiles(["chosen.txt"]);
+      await controller.refresh();
+      expect(controller.checked.size).toBe(0);
+      controller.toggleFiles(["chosen.txt"]);
       writeFileSync(join(base.cwd, "arriving.txt"), "new\n"); await controller.refresh();
-      expect(controller.checked.has("chosen.txt")).toBe(false); expect(controller.checked.has("arriving.txt")).toBe(true);
-      context = { ...base, space: "b" }; await controller.refresh(); expect(controller.checked.size).toBe(3);
+      expect([...controller.checked]).toEqual(["chosen.txt"]);
+      expect(controller.checked.has("arriving.txt")).toBe(false);
+      controller.toggleFiles(["chosen.txt"]); await controller.refresh();
+      expect(controller.checked.size).toBe(0);
+      controller.toggleFiles(["other.txt"]);
+      writeFileSync(join(base.cwd, "other.txt"), "other base\n"); await controller.refresh();
+      expect(controller.checked.size).toBe(0);
+      controller.toggleFiles(["chosen.txt"]);
+      context = { ...base, space: "b" }; await controller.refresh(); expect(controller.checked.size).toBe(0);
     } finally { controller.close(); }
   });
 });
@@ -89,8 +98,7 @@ describe("amend state and history", () => {
     try {
       await controller.refresh(); controller.setDraft("Normal draft"); await controller.setAmend(true);
       expect(controller.amend).toBe(true); expect(controller.draft().message).toBe(original);
-      expect(controller.files().map((file) => file.path)).toEqual(["root.txt"]); expect(controller.checked.has("root.txt")).toBe(true);
-      controller.toggleFiles(["root.txt"]);
+      expect(controller.files().map((file) => file.path)).toEqual(["root.txt"]); expect(controller.checked.has("root.txt")).toBe(false);
       const replacement = "\n  Rewritten root\n\n# preserve\n\n";
       controller.setDraft(replacement); await controller.mutate({ type: "commit" });
       expect(controller.error).toBeNull(); expect(controller.amend).toBe(false); expect(controller.draft().message).toBe("Normal draft");
@@ -99,14 +107,15 @@ describe("amend state and history", () => {
     } finally { controller.close(); }
   });
 
-  test("prior deletions remain visible and checked without becoming invalid pathspecs", async () => {
+  test("prior deletions start unchecked and can be included without invalid pathspecs", async () => {
     const context = repo(), root = context.cwd;
     rmSync(join(root, "chosen.txt")); must(root, "commit", "-am", "Delete chosen");
     const controller = new ChangesController({ exec, location: () => context });
     try {
       await controller.refresh(); await controller.setAmend(true);
       const deleted = controller.files().find((file) => file.path === "chosen.txt");
-      expect(deleted?.status).toBe("D"); expect(controller.checked.has("chosen.txt")).toBe(true);
+      expect(deleted?.status).toBe("D"); expect(controller.checked.has("chosen.txt")).toBe(false);
+      controller.toggleFiles(["chosen.txt"]);
       controller.setDraft("Still deleted"); await controller.mutate({ type: "commit" });
       expect(controller.error).toBeNull(); expect(must(root, "rev-list", "--count", "HEAD").trim()).toBe("2");
       expect(git(root, "show", "HEAD:chosen.txt").code).not.toBe(0);
@@ -120,10 +129,11 @@ describe("amend state and history", () => {
     try {
       await controller.refresh(); controller.toggleFiles(["chosen.txt"]); controller.setDraft("Normal draft");
       await controller.setAmend(true); expect(controller.checked.has("chosen.txt")).toBe(true);
+      expect(controller.checked.has("other.txt")).toBe(false);
       controller.setDraft("Temporary amend draft"); await controller.setAmend(false);
-      expect(controller.draft().message).toBe("Normal draft"); expect(controller.checked.has("chosen.txt")).toBe(false);
+      expect(controller.draft().message).toBe("Normal draft"); expect(controller.checked.has("chosen.txt")).toBe(true);
       expect(controller.files().map((file) => file.path)).toEqual(["chosen.txt"]);
-      await controller.setAmend(true); controller.toggleFiles(controller.files().map((file) => file.path));
+      await controller.setAmend(true); controller.toggleFiles(["chosen.txt"]);
       controller.setDraft("Message only"); await controller.mutate({ type: "commit" });
       expect(controller.error).toBeNull(); expect(must(root, "show", "HEAD:chosen.txt")).toBe("base\n");
       expect(readFileSync(join(root, "chosen.txt"), "utf8")).toBe("dirty\n");
@@ -213,6 +223,7 @@ describe("selected stash and rollback", () => {
     const context = repo(), root = context.cwd, controller = new ChangesController({ exec, location: () => context });
     try {
       writeFileSync(join(root, "chosen.txt"), "keep\n"); await controller.refresh();
+      controller.toggleFiles(["chosen.txt"]);
       const paths = [...controller.checked]; controller.toggleFiles(paths);
       await controller.mutate({ type: "rollback", paths, confirmed: true });
       expect(controller.error).not.toBeNull(); expect(readFileSync(join(root, "chosen.txt"), "utf8")).toBe("keep\n");

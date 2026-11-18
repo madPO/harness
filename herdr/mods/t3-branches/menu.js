@@ -117,7 +117,7 @@ export class Menu {
       })
       .child(v_flex().min_h(0).overflow_y_scrollbar().children(this.items.map((item, i) => h_flex()
         .id(`branch-action-${item.type}`).h(30).flex_none().px(8).rounded(5).items_center().relative()
-        .role("menuitem").accessibility_label(item.label).disabled(Boolean(this.busy))
+        .role("menu_item").accessibility_label(item.label).disabled(Boolean(this.busy))
         .text_color(item.danger ? t.ansi1 : t.foreground)
         .when(i === this.at, (el) => el.bg(t.selected))
         .when(!this.busy, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.choose(i, cx)))
