@@ -1,4 +1,5 @@
 import { parseStatus, groupsOf, parsePrevious, validPath, commitArgs, repositoryKey } from "./model.js";
+import { parsePreview } from "./preview.js";
 
 // No shell, external diff driver, textconv, fsmonitor, or optional index writes.
 export const READ = ["--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -48,6 +49,37 @@ export async function readPrevious(snapshot, exec) {
   const identity = await readIdentity(snapshot, exec);
   if (identity.head !== snapshot.head || identity.branch !== snapshot.branch) throw new Error("Repository HEAD changed. Refresh before enabling Amend.");
   return { head: snapshot.head, message: commit.message, files };
+}
+
+// Compare HEAD with the complete working-tree file, never just one index side.
+// --no-index handles additions on the execution machine without reading through host fs.
+export async function readPreview(snapshot, file, exec, { isCurrent = () => true } = {}) {
+  if (snapshot.state !== "ready" || !snapshot.root || !validPath(file.path)) throw new Error("No valid file selected");
+  const read = async (args, different = false) => {
+    if (!isCurrent()) throw new Error("Preview is no longer current");
+    const result = await run(exec, snapshot, args);
+    if (result.code !== 0 && !(different && result.code === 1)) throw new Error(message(result));
+    return result.stdout;
+  };
+  const flags = ["--patch", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3",
+    "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--ignore-submodules=none"];
+  let text;
+  if (file.group === "previous") {
+    const commit = await previousCommit(snapshot, (program, argv, options) => {
+      if (!isCurrent()) throw new Error("Preview is no longer current");
+      return exec(program, argv, options);
+    });
+    text = commit.revisions.length === 1
+      ? await read(["diff-tree", "--root", "--no-commit-id", "-r", "-p", ...flags, snapshot.head, "--", file.path])
+      : await read(["diff", ...flags, ...commit.revisions, "--", file.path]);
+  } else if (file.untracked || !snapshot.head) {
+    // A staged addition deleted before the first commit has no net HEAD change.
+    text = !snapshot.head && file.xy?.[1] === "D" ? ""
+      : await read(["diff", "--no-index", ...flags, "--", "/dev/null", `./${file.path}`], true);
+  } else {
+    text = await read(["diff", ...flags, snapshot.head, "--", file.path]);
+  }
+  return parsePreview(text);
 }
 
 // The controller supplies a live context guard. Checks surround every awaited

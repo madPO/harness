@@ -1,11 +1,13 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
+import { spaces, panes, focused, exec, theme, settings, setShared, layout } from "herdr";
 import { ChangesController } from "./controller.js";
-import { displayPath, repositoryKey, fileTree, treeRows } from "./model.js";
+import { displayPath, contextKey, repositoryKey, fileTree, treeRows } from "./model.js";
 import { TREE_ROW, treeRow } from "./tree-row.js";
 import { resolveContext } from "./context.js";
 import { scrollList } from "./list.js";
+import { readPreview } from "./git.js";
+import { wideChanges } from "./preview.js";
 
 const UI = { header: 36, scrollbar: 16, text: 12, radius: 5, commitRadius: 8, commitHeight: 30 };
 const location = () => resolveContext(spaces(), panes(), focused());
@@ -13,7 +15,7 @@ const location = () => resolveContext(spaces(), panes(), focused());
 export default class Changes extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
-    this.handles = Object.fromEntries(["refresh", "stash", "rollback", "confirm-rollback", "cancel-rollback", "all", "amend", "commit", "commit-push", "tree"].map((id) => [id, cx.focus_handle()]));
+    this.handles = Object.fromEntries(["refresh", "stash", "rollback", "confirm-rollback", "cancel-rollback", "all", "amend", "commit", "commit-push", "tree", "diff"].map((id) => [id, cx.focus_handle()]));
     this.collapsed = new Set(); this.width = 900; this.height = 600; this.treeAt = 0;
     this.treeReveal = -1;
     this.id = `t3-changes-${Math.random().toString(36).slice(2)}`;
@@ -28,6 +30,7 @@ export default class Changes extends View {
         if (!this.handles[id]) this.handles[id] = cx.focus_handle();
       }
       if (this.rollbackRequest && this.rollbackRequest.key !== this.confirmationKey()) this.rollbackRequest = null;
+      this.syncPreview(cx);
       cx.notify();
     },
       publish: () => setShared("git-graph.changed", Date.now()) });
@@ -38,12 +41,16 @@ export default class Changes extends View {
     this.start(cx, () => this.controller.refresh());
     this.focusWatch = cx.timer.every(150, (cx) => {
       const switched = this.requestContext(cx);
+      this.syncPreview(cx);
       const key = Object.entries(this.handles).find(([, handle]) => handle.is_focused())?.[0];
       if (key !== this.focusedControl || switched) { this.focusedControl = key; cx.notify(); }
     });
   }
 
-  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.messageState.release(); }
+  close() {
+    this.controller.close(); this.previewRequest = null; this.preview = null; this.previewError = null; this.previewWork?.cancel();
+    this.contextWork?.cancel(); this.focusWatch?.cancel(); this.messageState.release();
+  }
   start(cx, action) { cx.spawn(async () => { await action(); }); }
   mutate(cx, action) { this.rollbackRequest = null; this.start(cx, () => this.controller.mutate(action)); }
 
@@ -70,6 +77,54 @@ export default class Changes extends View {
       if (!this.controller.closed) this.start(cx, () => this.controller.refresh());
     });
     return true;
+  }
+
+  previewFile() {
+    return this.controller.files().find((file) => `file:${file.path}` === this.activeRow) ?? null;
+  }
+
+  previewCurrent(request) {
+    const c = this.controller;
+    return Boolean(request && this.previewRequest === request && !c.closed && !c.loading && !c.busy
+      && wideChanges(layout()) && contextKey(location()) === request.context && c.context === request.context
+      && c.snapshot === request.snapshot && c.generation === request.generation
+      && c.amendGeneration === request.amendGeneration && c.previous === request.previous && c.amend === request.amend
+      && this.previewFile()?.path === request.file.path);
+  }
+
+  // Render can invalidate or queue work. Only timers and event callbacks start reads or notify.
+  syncPreview(cx, deferred = false) {
+    const c = this.controller, wide = wideChanges(layout()), file = this.previewFile();
+    const eligible = wide && !c.closed && !c.loading && !c.busy && c.snapshot?.state === "ready"
+      && contextKey(location()) === c.context && file;
+    const current = this.previewRequest;
+    if (wide === this.previewWide && (eligible ? this.previewCurrent(current) && current.file.path === file.path : !current)) return;
+    this.previewWide = wide;
+    this.previewWork?.cancel(); this.previewWork = null;
+    this.preview = null; this.previewError = null;
+    const request = eligible ? { file, snapshot: c.snapshot, context: c.context, generation: c.generation,
+      amendGeneration: c.amendGeneration, previous: c.previous, amend: c.amend } : null;
+    this.previewRequest = request;
+    this.scrollTop = { ...this.scrollTop, [`${this.id}-diff-y`]: 0 };
+    const load = (cx) => {
+      this.previewWork = null;
+      if (c.closed) return;
+      cx.notify();
+      if (!this.previewCurrent(request)) return;
+      this.start(cx, async () => {
+        try {
+          const preview = await readPreview(request.snapshot, request.file, exec, { isCurrent: () => this.previewCurrent(request) });
+          if (!this.previewCurrent(request)) return;
+          this.preview = { ...preview, width: preview.rows.reduce((width, row) => Math.max(width, 128 + row.text.length * UI.text * 0.6), 300) };
+        } catch (error) {
+          if (!this.previewCurrent(request)) return;
+          this.previewError = String(error?.message ?? error);
+        }
+        if (this.previewCurrent(request)) cx.notify();
+      });
+    };
+    if (deferred) this.previewWork = cx.timer.after(0, load);
+    else load(cx);
   }
 
   control(t, id, label, content, action, { disabled = false, primary = false } = {}) {
@@ -108,6 +163,7 @@ export default class Changes extends View {
     this.activeRow = this.rowKey(row);
     if (!row.file) this.toggle(this.collapsed, `changes:${row.path}`);
     else this.toggleFiles([row.path]);
+    this.syncPreview(cx);
     cx.notify();
   }
   toggle(set, key) { if (set.has(key)) set.delete(key); else set.add(key); }
@@ -167,12 +223,13 @@ export default class Changes extends View {
               const row = rows[at]; if (!row) return;
               if (["up", "down", "home", "end"].includes(e.key)) {
                 this.treeAt = e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, at + (e.key === "down" ? 1 : -1)));
-                this.treeReveal = this.treeAt;
+                this.treeReveal = this.treeAt; this.activeRow = this.rowKey(rows[this.treeAt]);
               } else if (e.key === "enter") this.activateRow(row, cx);
               else if (e.key === "space" && !locked) { this.activeRow = this.rowKey(row); this.toggleFiles(pathsOf(row)); }
               else if (["left", "right"].includes(e.key) && !row.file) {
                 if (e.key === "left") this.collapsed.add(`changes:${row.path}`); else this.collapsed.delete(`changes:${row.path}`);
               } else return;
+              this.syncPreview(cx);
               cx.stop_propagation(); cx.notify();
             })
             .child(scrollList(this, listId, { count: rows.length, row: TREE_ROW, at: reveal,
@@ -234,8 +291,51 @@ export default class Changes extends View {
       .child(this.tree(t));
   }
 
+  diffPreview(t) {
+    const file = this.previewFile(), preview = this.preview, rows = preview?.rows ?? [];
+    const listId = `${this.id}-diff-y`, xId = `${this.id}-diff-x`;
+    const status = this.previewError ? `Can't show this diff: ${this.previewError}. Refresh changes to try again.`
+      : this.controller.busy || this.controller.loading ? "Waiting for repository changes…"
+      : !file ? "Select a changed file to preview its diff."
+      : !preview ? "Loading diff…"
+      : preview.state === "binary" ? "Binary file changed; no text preview."
+      : preview.state === "empty" ? "No text changes relative to HEAD." : null;
+    return v_flex().id(`${this.id}-preview`).flex_1().h_full().min_h(0).min_w(0).bg(t.background)
+      .role("group").accessibility_label("Selected file preview. Read-only unified diff.")
+      .child(h_flex().h(UI.header).flex_none().px(10).items_center().min_w(0).bg(t.raised).border_b(1).border_color(t.border)
+        .child(div().flex_1().min_w(0).overflow_x_scroll().font_medium().child(file ? displayPath(file.path) : "File preview")))
+      .when(Boolean(status), (el) => el.child(div().flex_none().px(12).py(8).text_color(this.previewError ? t.ansi1 : t.muted).child(status)))
+      .when(Boolean(preview?.notice), (el) => el.child(div().flex_none().px(12).py(6).text_color(t.muted).child(preview.notice)))
+      .child(div().flex_1().min_h(0).min_w(0).relative().font_family(settings()?.font_family ?? "JetBrains Mono")
+        .border(2).border_color(this.handles.diff.is_focused() ? t.accent : t.border)
+        .track_focus(this.handles.diff).tab_index(0)
+        .on_key_down((e, cx) => {
+          if (!this.handles.diff.is_focused() || !["up", "down", "pageup", "pagedown", "home", "end"].includes(e.key)) return;
+          const height = this.listHeight?.[listId] ?? 0, max = Math.max(0, rows.length * 20 - height);
+          const step = e.key.startsWith("page") ? height : 20;
+          const top = this.scrollTop?.[listId] ?? 0;
+          this.scrollTop = { ...this.scrollTop, [listId]: e.key === "home" ? 0 : e.key === "end" ? max
+            : Math.max(0, Math.min(max, top + (["up", "pageup"].includes(e.key) ? -step : step))) };
+          cx.stop_propagation(); cx.notify();
+        })
+        .child(div().id(xId).absolute().inset_0().min_w(0).overflow_x_scroll()
+          .child(div().w_full().min_w(preview?.width ?? 300).h_full()
+            .child(scrollList(this, listId, { count: rows.length, row: 20, wheeled: () => {},
+              draw: (i) => {
+                const row = rows[i], color = row.kind === "add" ? t.ansi2 : row.kind === "remove" ? t.ansi1 : row.kind === "hunk" ? t.accent : t.foreground;
+                return h_flex().h(20).items_center().text_size(UI.text).text_color(color)
+                  .when(row.kind === "hunk", (el) => el.bg(t.raised))
+                  .child(div().w(48).flex_none().text_right().pr(6).text_color(t.muted).child(row.old === null ? "" : String(row.old)))
+                  .child(div().w(48).flex_none().text_right().pr(6).text_color(t.muted).child(row.next === null ? "" : String(row.next)))
+                  .child(div().flex_none().px(6).child(row.text));
+              } }).size_full()))))
+      .child(div().h(UI.scrollbar).flex_none().w_full().min_w(0).relative()
+        .child(Scrollbar.horizontal(xId).mode("always").viewport_from_layout().absolute().inset_0()));
+  }
+
   render(cx) {
     this.requestContext(cx);
+    this.syncPreview(cx, true);
     const t = theme();
     return v_flex().id(this.id).size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(UI.text)
       .track_focus(this.handle).on_key_down((e, cx) => {
@@ -247,7 +347,10 @@ export default class Changes extends View {
       .when(Boolean(this.controller.error), (el) => el.child(v_flex().w_full().max_h(100).flex_none().overflow_y_scrollbar().px(10).py(6).gap(4)
         .text_color(t.ansi1).child(this.controller.error)
         .child(div().text_color(t.muted).child("Check Git's message before trying again."))))
-      .child(this.fileList(t))
-      .child(this.commitFooter(t));
+      .when(!this.previewWide, (el) => el.child(this.fileList(t)).child(this.commitFooter(t)))
+      .when(this.previewWide, (el) => el.child(h_flex().id(`${this.id}-wide`).flex_1().min_h(0).min_w(0)
+        .child(v_flex().w(Math.min(480, Math.max(240, this.width * 0.34), this.width * 0.5)).h_full().flex_none().min_h(0).min_w(0)
+          .border_r(1).border_color(t.border).child(this.fileList(t)).child(this.commitFooter(t)))
+        .child(this.diffPreview(t))));
   }
 }

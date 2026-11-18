@@ -3,9 +3,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseStatus, groupsOf, fileTree, treeRows, commitArgs, displayPath, parsePrevious, unifiedFiles } from "../herdr/mods/t3-changes/model.js";
-import { readSnapshot, perform, type Exec } from "../herdr/mods/t3-changes/git.js";
+import { readSnapshot, readPrevious, readPreview, perform, type Exec } from "../herdr/mods/t3-changes/git.js";
 import { ChangesController } from "../herdr/mods/t3-changes/controller.js";
 import { resolveContext } from "../herdr/mods/t3-changes/context.js";
+import { parsePreview, PREVIEW_LIMITS, wideChanges } from "../herdr/mods/t3-changes/preview.js";
 import type { Location } from "../herdr/mods/t3-changes/model.js";
 
 const roots: string[] = [];
@@ -71,6 +72,115 @@ describe("Changes calculations", () => {
     expect(commitArgs("First line\nSecond line")).toEqual(["commit", "--cleanup=verbatim", "-m", "First line\nSecond line"]);
     expect(() => commitArgs(" \t\r\n ")).toThrow("Enter a commit message");
     expect(() => commitArgs("Message\0body")).toThrow("NUL");
+  });
+});
+
+describe("Changes preview calculations", () => {
+  test("only an open active Changes panel replacing work enables preview", () => {
+    const work = { id: "work", hidden: false }, panel = { id: "panel", hidden: false };
+    const body = { id: "panel-body", active: "changes" };
+    const root = { children: [work, { ...panel, children: [body] }] };
+    expect(wideChanges(root)).toBe(false);
+    work.hidden = true; expect(wideChanges(root)).toBe(true);
+    body.active = "graph"; expect(wideChanges(root)).toBe(false);
+    body.active = "changes"; root.children[1].hidden = true; expect(wideChanges(root)).toBe(false);
+    expect(wideChanges({ children: [work, body] })).toBe(false);
+  });
+
+  test("numbers hunks, retains markers, and bounds rows and escaped lines", () => {
+    const preview = parsePreview("diff --git a/a b/a\n@@ -4,2 +8,2 @@\n-old\n+new\n kept\n");
+    expect(preview.rows.slice(2)).toEqual([
+      { kind: "remove", old: 4, next: null, text: "-old" },
+      { kind: "add", old: null, next: 8, text: "+new" },
+      { kind: "context", old: 5, next: 9, text: " kept" },
+    ]);
+    const long = parsePreview("@@ -0,0 +1 @@\n+" + "\t".repeat(2100) + "\n" + "+more\n".repeat(4000));
+    expect(long.rows).toHaveLength(PREVIEW_LIMITS.rows);
+    expect(long.rows[1].text.length).toBeLessThanOrEqual(PREVIEW_LIMITS.line);
+    expect(long.notice).toContain("3,000 rows");
+    expect(parsePreview("")).toMatchObject({ state: "empty", rows: [] });
+    expect(parsePreview("Binary files a/a and b/a differ\n").state).toBe("binary");
+  });
+});
+
+describe("Changes preview real Git boundary", () => {
+  test("combines staged and unstaged changes relative to HEAD", async () => {
+    const context = repo();
+    writeFileSync(join(context.cwd, "tracked.txt"), "index version\n"); must(context.cwd, "add", "tracked.txt");
+    writeFileSync(join(context.cwd, "tracked.txt"), "complete working version\n");
+    const snapshot = await readSnapshot(context, exec), file = unifiedFiles(snapshot)[0];
+    const preview = await readPreview(snapshot, file, exec);
+    expect(preview.rows.map((row) => row.text)).toContain("-base");
+    expect(preview.rows.map((row) => row.text)).toContain("+complete working version");
+    expect(preview.rows.some((row) => row.text.includes("index version"))).toBe(false);
+    expect(must(context.cwd, "diff", "--cached")).toContain("+index version");
+  });
+
+  test("reads untracked and unborn additions with literal unusual paths without changing the index", async () => {
+    for (const initial of [false, true]) {
+      const context = repo(initial);
+      for (const path of ["-odd [x]*\nname.txt", ":(glob)*.txt"]) {
+        writeFileSync(join(context.cwd, path), "literal preview\n");
+        let snapshot = await readSnapshot(context, exec);
+        let file = unifiedFiles(snapshot).find((file) => file.path === path)!;
+        const before = must(context.cwd, "ls-files", "--stage", "-z");
+        expect((await readPreview(snapshot, file, exec)).rows.map((row) => row.text)).toContain("+literal preview");
+        expect(must(context.cwd, "ls-files", "--stage", "-z")).toBe(before);
+        must(context.cwd, "--literal-pathspecs", "add", "--", path);
+        writeFileSync(join(context.cwd, path), "working addition\n");
+        snapshot = await readSnapshot(context, exec); file = unifiedFiles(snapshot).find((file) => file.path === path)!;
+        expect((await readPreview(snapshot, file, exec)).rows.map((row) => row.text)).toContain("+working addition");
+      }
+    }
+  });
+
+  test("shows deletions and binary metadata without a text fallback", async () => {
+    const context = repo();
+    writeFileSync(join(context.cwd, "binary.bin"), Buffer.from([0, 1, 2])); must(context.cwd, "add", "binary.bin");
+    must(context.cwd, "commit", "-m", "Binary baseline");
+    rmSync(join(context.cwd, "tracked.txt"));
+    writeFileSync(join(context.cwd, "binary.bin"), Buffer.from([0, 3, 4]));
+    writeFileSync(join(context.cwd, "new-binary.bin"), Buffer.from([0, 7, 8]));
+    const snapshot = await readSnapshot(context, exec);
+    for (const file of unifiedFiles(snapshot)) {
+      const calls: string[][] = [];
+      const preview = await readPreview(snapshot, file, async (program, argv, options) => {
+        calls.push(argv); return exec(program, argv, options);
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain("--no-ext-diff"); expect(calls[0]).toContain("--no-textconv");
+      if (file.path === "tracked.txt") expect(preview.rows.map((row) => row.text)).toContain("-base");
+      else expect(preview.state).toBe("binary");
+    }
+  });
+
+  test("shows previous-only amend changes for root and ordinary commits", async () => {
+    const context = repo();
+    for (const rootCommit of [true, false]) {
+      if (!rootCommit) {
+        writeFileSync(join(context.cwd, "tracked.txt"), "second commit\n"); must(context.cwd, "commit", "-am", "Second");
+      }
+      const snapshot = await readSnapshot(context, exec), previous = await readPrevious(snapshot, exec);
+      const preview = await readPreview(snapshot, previous.files[0], exec);
+      expect(preview.rows.map((row) => row.text)).toContain(rootCommit ? "+base" : "+second commit");
+      if (!rootCommit) expect(preview.rows.map((row) => row.text)).toContain("-base");
+    }
+  });
+
+  test("forwards remote execution and reports genuine Git errors", async () => {
+    const context = repo(), snapshot = await readSnapshot(context, exec);
+    const file = { path: "-remote.txt", group: "unstaged" as const, status: "A", xy: "??", untracked: true, conflict: false };
+    const remote = { ...snapshot, on: "build-machine" };
+    const calls: Array<{ argv: string[]; options: { cwd: string; on?: string | null } }> = [];
+    const boundary: Exec = async (_program, argv, options) => {
+      calls.push({ argv, options }); return { code: 1, stdout: "@@ -0,0 +1 @@\n+remote\n", stderr: "" };
+    };
+    expect((await readPreview(remote, file, boundary)).rows.at(-1)?.text).toBe("+remote");
+    expect(calls[0].options).toEqual({ cwd: snapshot.root!, on: "build-machine" });
+    expect(calls[0].argv.slice(-2)).toEqual(["/dev/null", "./-remote.txt"]);
+    await expect(readPreview(remote, file, async () => ({ code: 2, stdout: "", stderr: "permission denied reading file" })))
+      .rejects.toThrow("permission denied reading file");
+    await expect(readPreview(remote, { ...file, untracked: false }, boundary)).rejects.toThrow("+remote");
   });
 });
 
@@ -439,7 +549,7 @@ describe("Changes live space context", () => {
   });
 });
 
-test("Changes native tree selection, constrained layout, and context scheduling stay independent of file previews", async () => {
+test("Changes native tree, wide-only selected preview, and context scheduling preserve inclusion", async () => {
   const first = repo(), second = repo();
   writeFileSync(join(first.cwd, "tracked.txt"), "first native edit\n");
   writeFileSync(join(second.cwd, "tracked.txt"), "second native edit\n");
@@ -451,6 +561,10 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     import assert from "node:assert/strict";
     import { unlinkSync } from "node:fs";
     let rendering = false, lazyRendering = false, virtualHandles = 0, queries = 0, drawn = [], nodes = [], lazyRenders = [], focus, activeHandle;
+    let contentReads = 0, notifications = 0, holdPreview = false, heldPreview = null, failPreview = false;
+    const work = { id: "work", hidden: false }, panelBody = { id: "panel-body", active: "changes" };
+    const panel = { id: "panel", hidden: false, children: [panelBody] };
+    const layoutTree = { children: [work, panel] };
     const spaces = [
       { id: "a", active: true, folder: "/same-startup", machine: null, tabs: [{ id: "ta" }] },
       { id: "b", active: false, folder: "/same-startup", machine: null, tabs: [{ id: "tb" }] },
@@ -510,6 +624,7 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     }));
     mock.module("herdr", () => ({
       spaces: () => spaces, panes: () => panes, focused: () => focus,
+      layout: () => layoutTree,
       settings: () => ({ zoom: 1 }),
       theme: () => ({
         background: "#112233", foreground: "#112233", accent: "#112233",
@@ -519,9 +634,18 @@ test("Changes native tree selection, constrained layout, and context scheduling 
       }), setShared() {},
       exec: async (program, argv, options) => {
         assert.equal(rendering, false, "Git queried during render"); queries++;
-        assert(!argv.includes("diff") && !argv.includes("show") && !argv.includes("cat-file") && !argv.includes("ls-files"),
-          "listing and inclusion must not load file content");
+        const content = argv.includes("diff") || argv.includes("diff-tree") || argv.includes("cat-file");
+        if (content) {
+          contentReads++;
+          assert(work.hidden && !panel.hidden && panelBody.active === "changes", "content read outside expanded Changes");
+          assert(!view.controller.busy && !view.controller.loading, "content read during repository operation");
+          if (failPreview) { failPreview = false; return { code: 2, stdout: "", stderr: "Preview fixture failure" }; }
+        }
         const result = Bun.spawnSync([program, ...argv], { cwd: options.cwd, env: ${JSON.stringify(env)} });
+        if (content && holdPreview) {
+          holdPreview = false;
+          const gate = Promise.withResolvers(); heldPreview = gate.resolve; await gate.promise;
+        }
         return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
       },
     }));
@@ -535,7 +659,7 @@ test("Changes native tree selection, constrained layout, and context scheduling 
         const handle = { is_focused: () => activeHandle === handle, focus() { activeHandle = handle; } };
         return handle;
       },
-      notify() { assert.equal(rendering, false, "native notify during render"); },
+      notify() { assert.equal(rendering, false, "native notify during render"); notifications++; },
       spawn(callback) { assert.equal(rendering, false, "spawn starts action during render"); pending.push(callback()); },
       timer: { after: (_ms, callback) => register(once, callback), every: (_ms, callback) => register(repeat, callback) },
     };
@@ -653,7 +777,7 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     assert(view.controller.checked.has("src/nested.txt")); onlySelected("-row-folder-src");
     emit(byId("-folder-src"), "on_change", false); render(); assert(!view.controller.checked.has("src/nested.txt"));
     onlySelected("-row-folder-src");
-    key("down"); render(); onlySelected("-row-folder-src");
+    key("down"); render(); onlySelected("-row-file-src/nested.txt");
     key("space"); render(); onlySelected("-row-file-src/nested.txt");
     assert(view.controller.checked.has("src/nested.txt"));
     key("enter"); render(); assert(!view.controller.checked.has("src/nested.txt"));
@@ -703,6 +827,100 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     for (let i = 0; i < 12; i++) { render(); await tick(); }
     emit(byId("-row-file-tracked.txt"), "on_click"); render(); onlySelected("-row-file-tracked.txt");
     assert.equal(queries, initialQueries, "stable focus must not poll Git");
+    assert.equal(contentReads, 0, "normal mode stays content-free even at width 1440");
+    const includedBeforeWide = [...view.controller.checked].sort(), beforeWideNotify = notifications;
+    work.hidden = true; await tick(); render();
+    assert(notifications > beforeWideNotify, "expanding without resizing must notify the native surface");
+    assert.equal(byId("-wide").data.kind, "h_flex");
+    const [wideLeft, wideRight] = byId("-wide").data.children;
+    assert.equal(wideLeft.data.kind, "v_flex"); assert.equal(wideRight, byId("-preview"));
+    assert(wideLeft.data.styles.w[0] <= 480 && wideLeft.data.styles.w[0] <= view.width * 0.5);
+    assert.deepEqual(wideLeft.data.styles.min_h, [0]); assert.deepEqual(wideRight.data.styles.min_w, [0]);
+    assert(wideLeft.data.children.at(-1).data.children.some(node => node.data.kind === "textarea"));
+    assert(drawn.includes("-base") && drawn.includes("+first native edit"));
+    assert.deepEqual([...view.controller.checked].sort(), includedBeforeWide, "expansion must not change inclusion");
+    assert.equal(nodes.filter(node => node.data.kind === "horizontal-scrollbar").length, 2);
+    assert.equal(nodes.filter(node => node.data.kind === "virtual-list").length, 0);
+    const readsAfterWide = contentReads;
+    for (let i = 0; i < 3; i++) { render(); await tick(); }
+    assert.equal(contentReads, readsAfterWide, "stable expanded preview must not poll content");
+    emit(byId("-diff-y"), "on_size_change", { width: 900, height: 40 }); render();
+    assert(byId("-diff-y").data.children.length <= 3, "diff rows must use the measured ordinary-render window");
+    emit(byId("-diff-y"), "on_scroll_wheel", { delta: { x: 0, y: -20 } }); render();
+    assert.equal(view.scrollTop[view.id + "-diff-y"], 20);
+    view.handles.diff.focus();
+    const diffKeys = nodes.find(node => node.data.styles.track_focus?.[0] === view.handles.diff);
+    emit(diffKeys, "on_key_down", { key: "end" }); render();
+    assert(view.scrollTop[view.id + "-diff-y"] > 20, "keyboard users must scroll the read-only diff");
+    emit(byId("-diff-y"), "on_size_change", { width: 900, height: 600 });
+    view.handles.tree.focus(); render();
+    key("home"); await settle(); render();
+    assert(drawn.includes("Select a changed file to preview its diff."), "folder navigation clears preview consistently");
+    key("down"); await settle(); render();
+    assert(drawn.includes("+nested private content"));
+    assert.deepEqual([...view.controller.checked].sort(), includedBeforeWide, "arrows preview files without checking them");
+    emit(byId("-check-tracked.txt"), "on_change", true); await settle(); render();
+    assert(drawn.includes("+first native edit"), "checkbox activation selects that file for preview");
+    key("end"); await settle(); render();
+    const beforeSpace = view.controller.checked.has("tracked.txt");
+    key("space"); await settle(); render();
+    assert.equal(view.controller.checked.has("tracked.txt"), !beforeSpace); assert(drawn.includes("+first native edit"));
+    key("enter"); await settle(); render();
+    assert.equal(view.controller.checked.has("tracked.txt"), beforeSpace); assert(drawn.includes("+first native edit"));
+
+    // Refresh must discard the same selected path's old content immediately.
+    await Bun.write(${JSON.stringify(first.cwd)} + "/tracked.txt", "refreshed native edit\\n");
+    const freshContent = view.controller.refresh();
+    assert.equal(view.preview, null, "refresh invalidates content before status returns");
+    await freshContent; await settle(); render();
+    assert(drawn.includes("+refreshed native edit") && !drawn.includes("+first native edit"));
+    await Bun.write(${JSON.stringify(first.cwd)} + "/tracked.txt", "first native edit\\n");
+    await view.controller.refresh(); await settle(); render();
+
+    const releasePreview = () => { assert(heldPreview, "expected a pending content read"); const release = heldPreview; heldPreview = null; release(); };
+    // A read that finishes after collapse cannot repopulate the preview.
+    work.hidden = false; await tick(); render();
+    holdPreview = true; work.hidden = true;
+    const collapsingRead = tick();
+    assert(heldPreview); render(); assert(drawn.includes("Loading diff…"));
+    work.hidden = false; render();
+    releasePreview(); await collapsingRead; await flush(); render();
+    assert.equal(view.preview, null); assert(!nodes.some(node => node.data.styles.id?.[0] === view.id + "-preview"));
+    const collapsedReads = contentReads; await tick();
+    assert.equal(contentReads, collapsedReads);
+    work.hidden = true; await tick(); render();
+    assert(contentReads > collapsedReads && drawn.includes("+first native edit"), "re-expansion loads fresh content");
+
+    // An older file's completion cannot replace the newly active file.
+    holdPreview = true; await view.controller.refresh(); assert(heldPreview);
+    emit(byId("-row-file-first-only.txt"), "on_click");
+    releasePreview(); await settle(); render();
+    assert(drawn.includes("+first-only content") && !drawn.includes("+first native edit"));
+    assert.equal(view.previewRequest.file.path, "first-only.txt");
+    for (const hide of ["panel", "page"]) {
+      const beforeHide = contentReads;
+      if (hide === "panel") panel.hidden = true; else panelBody.active = "graph";
+      await tick(); render(); assert.equal(view.preview, null);
+      assert.equal(contentReads, beforeHide, "hidden pages must not read file content");
+      if (hide === "panel") panel.hidden = false; else panelBody.active = "changes";
+      await tick(); render(); assert(contentReads > beforeHide, "returning to Changes must reload");
+    }
+
+    // Preview failures stay local. Refresh can recover without replacing the draft.
+    work.hidden = false; await tick(); failPreview = true; work.hidden = true; await tick(); render();
+    assert(drawn.some(text => text.includes("Preview fixture failure")));
+    assert.equal(view.controller.error, null); assert.equal(view.controller.draft().message, "Draft from A");
+    emit(byId("-refresh"), "on_click"); await settle(); render();
+    assert(drawn.includes("+first-only content")); assert.equal(view.previewError, null);
+
+    // A live context guard rejects late content before the next repository loads.
+    holdPreview = true; await view.controller.refresh(); assert(heldPreview);
+    choose("b"); render(); releasePreview(); await settle(); await flush(); render();
+    assert.equal(view.controller.snapshot.space, "b"); assert.equal(view.preview, null);
+    assert(!drawn.includes("+first-only content") && !drawn.includes("+first native edit"));
+    assert(drawn.includes("Select a changed file to preview its diff."));
+    choose("a"); render(); await flush(); render();
+    work.hidden = false; await tick(); render();
     view.controller.error = "Old context error"; choose("b");
     const beforeSwitch = queries, beforeWrites = view.messageState.writes.length;
     render();
@@ -733,8 +951,12 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     assert.equal(view.controller.error, null);
     assert(drawn.includes("first-only.txt") && drawn.includes("nested.txt") && !drawn.includes("tracked.txt"));
     assert.equal(view.messageState.value(), "");
-    choose("b"); render();
-    const beforeClose = queries; view.close(); await flush(); await tick();
+    choose("b"); render(); await flush(); render();
+    work.hidden = true; await tick(); render();
+    holdPreview = true; emit(byId("-row-file-tracked.txt"), "on_click"); assert(heldPreview);
+    choose("a"); render();
+    const beforeClose = queries; view.close(); releasePreview(); await settle(); await flush(); await tick();
+    assert.equal(view.preview, null, "closed views must reject late preview results");
     assert.equal(queries, beforeClose, "closed view must cancel pending context work");
     assert(repeat.every(timer => timer.cancelled));
     console.log("Changes native tree and scheduling passed");

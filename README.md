@@ -264,7 +264,19 @@ Select **Changes** in the right-side panel to prepare a commit in the focused te
 All changed files appear once in a directory tree.
 Check files individually, check a folder's descendants, or select all files.
 Clicking a file row toggles its inclusion in the commit.
-Changes contains the file list and commit editor, without a diff preview at any panel width.
+The normal panel keeps the file list above the commit editor and never reads file contents.
+Expand the panel to full size to show the active file's read-only unified diff beside the list and editor.
+The preview follows the highlighted file, not the checked files.
+Arrow keys change the preview without changing inclusion.
+Clicking a file or its checkbox also activates that file for preview.
+Navigating onto a folder clears the preview.
+The normal panel remembers the active file for later expansion.
+Collapse or hide Changes to discard the preview; expanding again loads fresh content.
+The preview combines staged and unstaged changes relative to HEAD.
+New files, deleted files, and binary changes have dedicated preview states.
+Previous-only Amend files show their changes from the previous commit.
+Preview display stops at 3,000 rows and 2,000 characters per line, with a truncation notice.
+Use your terminal for the complete diff.
 Git Graph's **Open Changes** and **Show in Changes panel** actions still select this page.
 
 Use **Refresh** to reload external edits. Use **Stash selected** to stash checked files, including checked untracked files. Use **Rollback selected** to discard checked changes after confirmation. Rollback restores tracked files to HEAD and removes selected new files. Unchecked files remain untouched. Resolve conflicts outside Changes before using these actions.
@@ -285,7 +297,8 @@ Amend requires an existing commit.
 Changes keeps T3 Files' compact rows, file-type icons, and expandable folders.
 The tree supports horizontal and vertical scrolling.
 Long filenames remain readable through horizontal scrolling rather than permanent truncation.
-The file list fills the panel width, with the commit editor below.
+In normal mode, the file list fills the panel width, with the commit editor below.
+In full-size mode, the list and editor share a bounded left column beside the independently scrolling preview.
 
 Files start unchecked, including staged files and newly discovered changes.
 Select files explicitly before committing, stashing, or rolling back.
