@@ -370,14 +370,15 @@ describe("Branches focus context", () => {
   });
 });
 
-test("Branches native storage accepts absent pins, persists pins, and exposes corrupt preferences", async () => {
+test("Branches native rows support interaction, scrolling, and pin storage outside layout callbacks", async () => {
   const context = repo();
   const script = `
     import { mock } from "bun:test";
     import assert from "node:assert/strict";
     const cwd = ${JSON.stringify(context.cwd)};
-    const values = new Map(), signals = new Map(), pending = [];
+    const values = new Map(), signals = new Map(), pending = [], overlays = [], ticks = [];
     let missing, readError = null, writeError = null, drawn = [], controls = new Map();
+    let nodes = [], lazy = [], inLayout = false, focusedHandle, folder = cwd;
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
       getItem(key) {
         if (readError) throw readError;
@@ -389,32 +390,53 @@ test("Branches native storage accepts absent pins, persists pins, and exposes co
       },
     } });
     const element = () => {
-      let label;
+      const data = { children: [], handlers: {}, styles: {} };
       const node = new Proxy({}, { get: (_, key) => {
         if (key === "then") return undefined;
+        if (key === "data") return data;
         if (key === "when") return (condition, apply) => { if (condition) apply(node); return node; };
-        if (key === "child") return (value) => { if (typeof value === "string") drawn.push(value); return node; };
-        if (key === "accessibility_label") return (value) => { label = value; return node; };
-        if (key === "on_click") return (callback) => { if (label) controls.set(label, callback); return node; };
-        return () => node;
+        if (key === "child") return (value) => { data.children.push(value); return node; };
+        if (key === "children") return (values) => { data.children.push(...values); return node; };
+        if (key === "id") return (value) => { data.id = value; return node; };
+        if (key === "accessibility_label") return (value) => { data.label = value; return node; };
+        if (String(key).startsWith("on_")) return (...args) => {
+          assert.equal(inLayout, false, "native lazy rows cannot register " + String(key) + " during layout");
+          const name = key === "on_mouse_down" ? key + ":" + args[0] : key;
+          data.handlers[name] = args.at(-1); return node;
+        };
+        return (...args) => { data.styles[key] = args; return node; };
       } });
       return node;
     };
+    const layout = () => {
+      inLayout = true;
+      try { for (const render of lazy.splice(0)) render(); }
+      finally { inLayout = false; }
+    };
+    const virtualList = (_id, count, _height, _key, render) => {
+      const node = element();
+      lazy.push(() => node.children(render({ start: 0, end: count })));
+      return node;
+    };
+    virtualList("native-contract", 1, 24, () => "row", () => [element().on_click(() => {})]);
+    assert.throws(layout, /native lazy rows cannot register on_click during layout/);
     mock.module("gpui-kit", () => ({ View: class {}, div: element, svg: element }));
     mock.module("gpui-base", () => ({
       h_flex: element, v_flex: element,
       InputState: { new: element }, Input: { new: element },
       TextareaState: { new: element }, Textarea: { new: element }, Checkbox: { new: element },
-      VirtualListScrollHandle: { new: () => ({ release() {}, scroll_to_item() {} }) },
-      Scrollbar: { vertical: element, horizontal: element },
-      v_virtual_list: (_id, count, _height, _key, render) => { render({ start: 0, end: count }); return element(); },
+      VirtualListScrollHandle: { new: () => assert.fail("interactive trees must not allocate native virtual scroll handles") },
+      Scrollbar: { vertical: () => assert.fail("manual rows have no native vertical scrollbar"),
+        horizontal: (id) => element().id("scrollbar:" + id) },
+      v_virtual_list: virtualList,
     }));
     mock.module("herdr", () => ({
-      spaces: () => [{ id: "first", active: true, folder: cwd, machine: null, tabs: [] }],
+      spaces: () => [{ id: "first", active: true, folder, machine: null, tabs: [] }],
       panes: () => [], focused: () => null, props: () => ({}),
       theme: () => new Proxy({}, { get: () => "#112233" }),
+      settings: () => ({ zoom: 1 }),
       shared: (key) => signals.get(key), setShared: (key, value) => signals.set(key, value),
-      openOverlay() {}, closeOverlay() {},
+      openOverlay: (overlay) => overlays.push(overlay), closeOverlay() {},
       exec: async (program, argv, options) => {
         assert.equal(program, "git"); assert.equal(options.on, null);
         const result = Bun.spawnSync([program, ...argv], { cwd: options.cwd, env: ${JSON.stringify(env)} });
@@ -422,10 +444,15 @@ test("Branches native storage accepts absent pins, persists pins, and exposes co
       },
     }));
     const cx = {
-      focus_handle: () => ({ is_focused: () => false, focus() {} }),
+      focus_handle: () => {
+        const handle = { is_focused: () => focusedHandle === handle, focus() { focusedHandle = handle; } };
+        return handle;
+      },
       notify() {}, stop_propagation() {},
-      spawn(callback) { pending.push(callback()); },
-      timer: { after: () => ({ cancel() {} }), every: () => ({ cancel() {} }) },
+      spawn(callback) { pending.push(callback(cx)); },
+      timer: { after: () => ({ cancel() {} }), every: (delay, callback) => {
+        ticks.push(callback); return { cancel() {} };
+      } },
     };
     const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
     // Platform-only imports must load after native mocks register; static imports run before mock registration.
@@ -436,7 +463,19 @@ test("Branches native storage accepts absent pins, persists pins, and exposes co
       assert.equal(view.part.controller.error, null);
       return view;
     };
-    const render = (view) => { drawn = []; controls = new Map(); view.render(cx); };
+    const render = (view) => {
+      drawn = []; controls = new Map(); nodes = [];
+      const root = view.render(cx);
+      layout();
+      const visit = (value) => {
+        if (typeof value === "string") { drawn.push(value); return; }
+        if (!value?.data) return;
+        const data = value.data; nodes.push(data);
+        if (data.label && data.handlers.on_click) controls.set(data.label, data.handlers.on_click);
+        for (const child of data.children) visit(child);
+      };
+      visit(root);
+    };
     const assertHealthy = (view, pinned = false) => {
       render(view);
       assert(drawn.includes("main"), "actual branch rows must render");
@@ -503,10 +542,117 @@ test("Branches native storage accepts absent pins, persists pins, and exposes co
     assert.equal(values.size, 0);
     writeError = null; unwritable.close();
     console.log("Branches native pin storage passed");
+    values.clear();
+    const fixtureGit = (args, input) => {
+      const result = Bun.spawnSync(["git", ...args], { cwd, env: ${JSON.stringify(env)},
+        ...(input === undefined ? {} : { stdin: new TextEncoder().encode(input) }) });
+      assert.equal(result.exitCode, 0, result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    const tip = fixtureGit(["rev-parse", "HEAD"]);
+    const names = [...Array.from({ length: 140 }, (_, i) => "branch-" + String(i).padStart(3, "0")), "feature/nested/topic"];
+    fixtureGit(["update-ref", "--stdin"], names.map(name => "create refs/heads/" + name + " " + tip).join("\\n") + "\\n");
+    const view = await mount(), part = view.part, listId = part.id + "-tree-y";
+    const list = () => nodes.find(node => node.id === listId);
+    const keyDown = (key, modifiers = {}) => {
+      const tree = nodes.find(node => node.styles.role?.[0] === "tree");
+      assert(tree, "the rendered tree must receive keyboard events");
+      tree.handlers.on_key_down({ key, modifiers }, cx); render(view);
+    };
+    const click = (label) => {
+      const handler = controls.get(label); assert(handler, "missing rendered control: " + label);
+      handler({}, cx); render(view);
+    };
+    render(view);
+    assert(drawn.includes("142 branches"));
+    assert(drawn.includes("topic"), "loaded nested branch names must render");
+    assert(!drawn.includes("branch-139"), "unmeasured rendering must remain bounded");
+    assert(nodes.filter(node => node.styles.role?.[0] === "treeitem").length <= Math.ceil(2000 / 24));
+    assert(nodes.some(node => node.id === part.id + "-tree-x" && "overflow_x_scroll" in node.styles));
+    assert(nodes.some(node => node.id === "scrollbar:" + part.id + "-tree-x"));
+    assert("size_full" in list().styles, "the list must use the full available tree viewport");
+    part.handles.tree.focus();
+    keyDown("end"); keyDown("up"); keyDown("up");
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "branch-139");
+    assert(!drawn.includes("branch-139"), "keyboard reveal must wait for native viewport measurement");
+    assert.equal(part.treeReveal, part.treeAt);
+    list().handlers.on_size_change({ width: 300, height: 144 }, cx);
+    render(view);
+    assert.equal(part.listHeight[listId], 144);
+    assert(drawn.includes("branch-139"), "measurement must reveal the offscreen keyboard target");
+    assert.equal(part.treeReveal, null, "reveal must be consumed after a measured render");
+    assert.equal(nodes.filter(node => node.styles.role?.[0] === "treeitem").length, 6);
+    assert(nodes.some(node => node.label === "local branch branch-139"
+      && node.children.some(child => child?.data?.styles.border?.[0] === 2)), "keyboard focus must remain visible");
+    keyDown("space");
+    assert(part.controller.pins.has("refs/heads/branch-139"));
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "branch-139");
+    assert(controls.has("Unpin local branch branch-139"));
+    keyDown("space");
+    assert(!part.controller.pins.has("refs/heads/branch-139"));
+    list().handlers.on_scroll_wheel({ delta: { x: 0, y: 10000 } }, cx);
+    render(view);
+    assert.equal(part.scrollTop[listId], 0);
+    assert(drawn.includes("branch-000"));
+    assert(!drawn.includes("branch-139"), "wheel scrolling must expose rows away from keyboard focus");
+    render(view);
+    assert.equal(part.scrollTop[listId], 0, "ordinary renders must not snap back to the focused branch");
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "branch-139");
+    const wheel = list().handlers.on_scroll_wheel;
+    wheel({ delta: { x: 0, y: -24 } }, cx); wheel({ delta: { x: 0, y: -24 } }, cx);
+    render(view);
+    assert.equal(part.scrollTop[listId], 48, "wheel bursts must accumulate before the next render");
+    keyDown("home");
+    const expandedCount = part.visibleRows.length;
+    click("Collapse folder feature");
+    assert.equal(part.visibleRows.length, expandedCount - 2);
+    assert(!drawn.includes("topic"));
+    keyDown("right");
+    assert.equal(part.visibleRows.length, expandedCount);
+    assert(drawn.includes("topic"));
+    click("local branch feature/nested/topic");
+    click("Pin local branch feature/nested/topic");
+    assert(part.controller.pins.has("refs/heads/feature/nested/topic"));
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "feature/nested/topic");
+    assert(controls.has("Unpin local branch feature/nested/topic"));
+    keyDown("home"); keyDown("down"); keyDown("down"); keyDown("down"); keyDown("down");
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "feature/nested/topic");
+    assert(part.visibleRows[part.treeAt].id.includes("pinned/local"));
+    keyDown("space");
+    assert(!part.controller.pins.has("refs/heads/feature/nested/topic"));
+    assert.equal(part.visibleRows[part.treeAt].branch.name, "feature/nested/topic",
+      "unpinning a pinned duplicate must preserve the same branch in the local tree");
+    const pinControl = nodes.find(node => node.label === "Pin local branch feature/nested/topic");
+    assert.equal(pinControl.styles.tab_index?.[0], 0, "the focused branch's Pin control must remain tabbable");
+    pinControl.styles.track_focus[0].focus();
+    pinControl.handlers.on_key_down({ key: "enter" }, cx); render(view);
+    assert(part.controller.pins.has("refs/heads/feature/nested/topic"), "the Pin control must support keyboard activation");
+    assert(part.handles.tree.is_focused(), "pinning must return keyboard focus to the tree");
+    keyDown("space");
+    const target = nodes.find(node => node.styles.role?.[0] === "treeitem"
+      && node.label?.startsWith("local branch feature/nested/topic"));
+    assert(target?.handlers["on_mouse_down:right"], "visible branch rows must expose secondary click");
+    target.handlers["on_mouse_down:right"]({}, cx); await settle(); render(view);
+    assert.equal(overlays.at(-1).props.ctx.branch.ref, "refs/heads/feature/nested/topic");
+    assert.equal(overlays.at(-1).props.role, "menu");
+    keyDown("f10", { shift: true }); await settle(); render(view);
+    assert.equal(overlays.at(-1).props.ctx.branch.ref, "refs/heads/feature/nested/topic");
+    assert.equal(overlays.length, 2, "both pointer and keyboard branch actions must remain available");
+    keyDown("end"); keyDown("up"); keyDown("enter");
+    assert.equal(part.selectedRef, "refs/heads/main");
+    assert.equal(fixtureGit(["symbolic-ref", "--short", "HEAD"]), "main", "selection must not change Git checkout");
+    folder = null; ticks.at(-1)(cx); render(view);
+    assert.equal(part.treeReveal, null);
+    assert.equal(part.scrollTop[listId], 0, "context transitions must reset the previous repository's scroll position");
+    assert.equal(part.selectedRef, null);
+    assert(drawn.includes("No folder selected. Focus a terminal in a repository, then refresh."));
+    view.close();
+    console.log("Branches native row interaction and scrolling passed");
   `;
   // Native module mocks stay in this child process and cannot contaminate other suites.
   const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
   expect(stdout).toContain("Branches native pin storage passed");
+  expect(stdout).toContain("Branches native row interaction and scrolling passed");
 }, 30_000);

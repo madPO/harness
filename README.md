@@ -250,6 +250,12 @@ Preserve the `branches` block ID and its `t3-branches` content mod.
 Native Branches rendering, contrast across themes, and platform keyboard behavior still require verification in Herdr App.
 Mock-native control harnesses exercise handlers, not pixels or real-app layout.
 
+Branches and Changes render interactive rows during the normal view render, using T3 Files' visible-window list approach.
+Herdr forbids registering row handlers inside native virtual-list callbacks, which execute during layout.
+See the [native list contract](https://github.com/herdrdev/herdr-app/blob/8e1208deeff2a24441a192974e648c6fa0c5053c/vendor/gpui-kit/crates/shell/src/typings.rs#L2980-L3000).
+Copy each complete mod directory when updating, including its local `list.js`.
+Use the mouse wheel or keyboard to scroll vertically; the horizontal scrollbar exposes long names.
+
 Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository.
 All changed files appear once in a directory tree.
 Check files individually, check a folder's descendants, or select all files.

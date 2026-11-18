@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { h_flex, v_flex, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { h_flex, v_flex, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, theme, props, shared, setShared, openOverlay } from "herdr";
 import { BranchesController } from "./controller.js";
 import { branchTree, treeRows, contextKey, repositoryKey } from "./model.js";
@@ -7,6 +7,7 @@ import { resolveContext } from "./context.js";
 import { readActionContext, actionItems } from "./actions.js";
 import { Menu, ownerKey, requestKey, resultKey } from "./menu.js";
 import { Dialog } from "./dialog.js";
+import { scrollList } from "./list.js";
 
 const MOD = "mods/t3-branches";
 // Match Changes' compact native tree and control scale.
@@ -20,7 +21,7 @@ class Branches {
     this.id = `t3-branches-${Math.random().toString(36).slice(2)}`;
     this.handle = cx.focus_handle();
     this.handles = Object.fromEntries(["refresh", "tree", "pin"].map((id) => [id, cx.focus_handle()]));
-    this.treeScroll = VirtualListScrollHandle.new();
+    this.treeReveal = null;
     this.collapsed = new Set();
     this.visibleRows = [];
     this.treeAt = 0;
@@ -50,7 +51,6 @@ class Branches {
     setShared(ownerKey(this.id), null);
     this.contextWork?.cancel();
     this.focusWatch?.cancel();
-    this.treeScroll.release();
   }
 
   start(cx, action) { cx.spawn(async () => { await action(); }); }
@@ -117,6 +117,9 @@ class Branches {
     this.storageError = null;
     this.collapsed.clear();
     this.treeAt = 0;
+    this.treeReveal = null;
+    this.scrollTop = {};
+    this.pointerY = {};
     this.syncRows();
     if (!this.contextWork) this.contextWork = cx.timer.after(0, (cx) => {
       this.contextWork = null;
@@ -151,17 +154,22 @@ class Branches {
 
   syncRows() {
     const before = this.visibleRows[this.treeAt];
+    const previousAt = this.treeAt;
     const rows = treeRows(branchTree(this.controller.snapshot?.branches ?? [], this.controller.pins), this.collapsed);
-    const kept = before ? rows.findIndex((row) => row.id === before.id) : -1;
+    let kept = before ? rows.findIndex((row) => row.id === before.id) : -1;
+    if (kept < 0 && before?.branch) kept = rows.findIndex((row) => row.branch?.ref === before.branch.ref);
     this.visibleRows = rows;
     this.treeAt = kept >= 0 ? kept : Math.max(0, Math.min(this.treeAt, rows.length - 1));
+    if (before && this.treeAt !== previousAt) {
+      this.treeReveal = this.treeAt;
+    }
     if (!this.controller.snapshot?.branches.some((branch) => branch.ref === this.selectedRef)) this.selectedRef = null;
     this.treeWidth = rows.reduce((width, row) => Math.max(width, 220 + row.depth * UI.level + row.name.length * UI.text), 240);
   }
 
   moveTo(at) {
     this.treeAt = Math.max(0, Math.min(this.visibleRows.length - 1, at));
-    this.treeScroll.scroll_to_item(this.treeAt);
+    this.treeReveal = this.treeAt;
   }
 
   activate(row) {
@@ -169,14 +177,16 @@ class Branches {
     else {
       if (this.collapsed.has(row.id)) this.collapsed.delete(row.id); else this.collapsed.add(row.id);
       this.syncRows();
+      this.treeReveal = this.treeAt;
     }
   }
 
   togglePin(row) {
     if (!row.branch || this.controller.loading) return;
     this.handles.tree.focus();
+    this.treeAt = this.visibleRows.findIndex((candidate) => candidate.id === row.id);
     this.controller.togglePin(row.branch);
-    this.treeScroll.scroll_to_item(this.treeAt);
+    this.treeReveal = this.treeAt;
   }
 
   treeKey(e, cx) {
@@ -190,10 +200,10 @@ class Branches {
     else if (row.branch && ((e.key === "f10" && e.modifiers?.shift)
       || ["contextmenu", "context_menu", "menu", "apps"].includes(e.key))) this.openMenu(row, this.treeAt, cx);
     else if (e.key === "right" && row.children) {
-      if (this.collapsed.has(row.id)) { this.collapsed.delete(row.id); this.syncRows(); }
+      if (this.collapsed.has(row.id)) { this.collapsed.delete(row.id); this.syncRows(); this.treeReveal = this.treeAt; }
       else if (rows[this.treeAt + 1]?.depth > row.depth) this.moveTo(this.treeAt + 1);
     } else if (e.key === "left") {
-      if (row.children && !this.collapsed.has(row.id)) { this.collapsed.add(row.id); this.syncRows(); }
+      if (row.children && !this.collapsed.has(row.id)) { this.collapsed.add(row.id); this.syncRows(); this.treeReveal = this.treeAt; }
       else {
         for (let at = this.treeAt - 1; at >= 0; at--) {
           if (rows[at].depth < row.depth) { this.moveTo(at); break; }
@@ -258,6 +268,12 @@ class Branches {
 
   tree(t) {
     const rows = this.visibleRows;
+    const id = `${this.id}-tree-y`;
+    // Native lazy rows run during layout, when handler registration is forbidden.
+    // Reveal only after navigation or a tree change; wheel scrolling keeps its own position.
+    const list = scrollList(this, id, { count: rows.length, row: UI.row, at: this.treeReveal ?? -1,
+      draw: (at) => this.row(t, rows[at], at), wheeled: () => { this.treeReveal = null; } });
+    if (this.listHeight?.[id] !== undefined) this.treeReveal = null;
     return v_flex().w_full().flex_1().min_h(0).min_w(0)
       .child(div().flex_1().min_h(0).min_w(0).relative()
         .child(div().id(`${this.id}-tree-x`).size_full().min_w(0).overflow_x_scroll()
@@ -265,10 +281,7 @@ class Branches {
             .role("tree").accessibility_label("Branches. Arrows navigate, Enter selects or expands, Space pins a branch. Shift+F10 opens branch actions. Tab reaches the focused branch's Pin button. Selecting never checks out a branch.")
             .on_key_down((e, cx) => this.treeKey(e, cx))
             .on_scroll_wheel((_e, cx) => cx.stop_propagation())
-            .child(v_virtual_list(`${this.id}-tree-y`, rows.length, UI.row, (at) => rows[at].id,
-              (range) => rows.slice(range.start, range.end).map((row, at) => this.row(t, row, range.start + at)))
-              .track_scroll(this.treeScroll).size_full())))
-        .child(Scrollbar.vertical(`${this.id}-tree-y`).mode("always").viewport_from_layout().absolute().inset_0()))
+            .child(list.size_full()))))
       .child(div().w_full().min_w(0).h(UI.scrollbar).flex_none().relative()
         .child(Scrollbar.horizontal(`${this.id}-tree-x`).mode("always").viewport_from_layout().absolute().inset_0()));
   }

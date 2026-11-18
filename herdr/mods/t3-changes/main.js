@@ -1,10 +1,11 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
 import { ChangesController } from "./controller.js";
 import { displayPath, repositoryKey, fileTree, treeRows } from "./model.js";
 import { TREE_ROW, treeRow, statusBadge } from "./tree-row.js";
 import { resolveContext } from "./context.js";
+import { scrollList } from "./list.js";
 
 const UI = { header: 36, scrollbar: 16, text: 12, radius: 5, commitRadius: 8, commitHeight: 30 };
 const location = () => resolveContext(spaces(), panes(), focused());
@@ -14,7 +15,7 @@ export default class Changes extends View {
     this.handle = cx.focus_handle();
     this.handles = Object.fromEntries(["refresh", "stash", "rollback", "confirm-rollback", "cancel-rollback", "all", "amend", "commit", "commit-push", "tree"].map((id) => [id, cx.focus_handle()]));
     this.collapsed = new Set(); this.width = 900; this.height = 600; this.treeAt = 0;
-    this.treeScroll = VirtualListScrollHandle.new();
+    this.treeReveal = -1;
     this.id = `t3-changes-${Math.random().toString(36).slice(2)}`;
     this.messageState = TextareaState.new({ placeholder: "Commit message", value: "", rows: 5 });
     this.messageState.set_soft_wrap(true);
@@ -40,7 +41,7 @@ export default class Changes extends View {
     });
   }
 
-  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.treeScroll.release(); this.messageState.release(); }
+  close() { this.controller.close(); this.contextWork?.cancel(); this.focusWatch?.cancel(); this.messageState.release(); }
   start(cx, action) { cx.spawn(async () => { await action(); }); }
   mutate(cx, action) { this.rollbackRequest = null; this.start(cx, () => this.controller.mutate(action)); }
 
@@ -87,7 +88,10 @@ export default class Changes extends View {
     this.syncing = true;
     try {
       if (this.messageState.value() !== draft.message) this.messageState.set_value(draft.message);
-      if (key !== this.inputRepository) { this.inputRepository = key; this.treeAt = 0; this.collapsed.clear(); }
+      if (key !== this.inputRepository) {
+        this.inputRepository = key; this.treeAt = 0; this.treeReveal = -1; this.collapsed.clear();
+        this.scrollTop = {}; this.pointerY = {};
+      }
     } finally { this.syncing = false; }
   }
 
@@ -139,13 +143,16 @@ export default class Changes extends View {
         .role("button").accessibility_label(row.file ? `${c.checked.has(row.path) ? "Exclude" : "Include"} ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
         .cursor_pointer().on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = i; this.activateRow(row, cx); });
     };
+    // Reveal keyboard navigation once; subsequent wheel movement must not follow the focused row.
+    const listId = `${this.id}-tree-y`, reveal = this.treeReveal;
+    if (reveal >= 0 && this.listHeight?.[listId] !== undefined) this.treeReveal = -1;
     return v_flex().w_full().flex_1().min_h(0).min_w(0)
       .child(h_flex().h(28).flex_none().px(8).items_center().gap(6)
         .child(this.checkbox(t, "all", "Include all changed files", files.length > 0 && files.every((file) => c.checked.has(file.path)),
           () => this.toggleFiles(files.map((file) => file.path)), { disabled: locked || !files.length,
             partial: c.checked.size > 0 && c.checked.size < files.length, text: "Changes" }))
         .child(div().text_color(t.muted).child(`${files.length} files · ${c.checked.size} selected`)))
-      .child(div().flex_1().min_h(0).min_w(0).relative()
+      .child(div().flex_1().min_h(TREE_ROW).min_w(0).relative()
         .child(div().id(`${this.id}-tree-x`).absolute().inset_0().min_w(0).overflow_x_scroll()
           .child(div().w_full().min_w(width).h_full().track_focus(this.handles.tree).tab_index(0)
             .role("group").accessibility_label("Changed files. Arrows navigate, Enter toggles file inclusion or expands folders, Space toggles inclusion.")
@@ -154,7 +161,7 @@ export default class Changes extends View {
               const row = rows[at]; if (!row) return;
               if (["up", "down", "home", "end"].includes(e.key)) {
                 this.treeAt = e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, at + (e.key === "down" ? 1 : -1)));
-                this.treeScroll.scroll_to_item(this.treeAt);
+                this.treeReveal = this.treeAt;
               } else if (e.key === "enter") this.activateRow(row, cx);
               else if (e.key === "space" && !locked) this.toggleFiles(pathsOf(row));
               else if (["left", "right"].includes(e.key) && !row.file) {
@@ -162,12 +169,9 @@ export default class Changes extends View {
               } else return;
               cx.stop_propagation(); cx.notify();
             })
-            .on_scroll_wheel((_e, cx) => cx.stop_propagation())
-            .child(v_virtual_list(`${this.id}-tree-y`, rows.length, TREE_ROW, (i) => `${rows[i].file ? "file" : "folder"}:${rows[i].path}`,
-              (range) => rows.slice(range.start, range.end).map((row, i) => draw(row, range.start + i)))
-              .track_scroll(this.treeScroll).size_full())
-            .when(!rows.length, (el) => el.child(div().absolute().inset_0().p(12).text_color(t.muted).child(this.emptyMessage())))))
-        .child(Scrollbar.vertical(`${this.id}-tree-y`).mode("always").viewport_from_layout().absolute().inset_0()))
+            .child(scrollList(this, listId, { count: rows.length, row: TREE_ROW, at: reveal,
+              draw: (i) => draw(rows[i], i), wheeled: () => { this.treeReveal = -1; } }).size_full())
+            .when(!rows.length, (el) => el.child(div().absolute().inset_0().p(12).text_color(t.muted).child(this.emptyMessage()))))))
       .child(div().w_full().min_w(0).h(UI.scrollbar).flex_none().relative()
         .child(Scrollbar.horizontal(`${this.id}-tree-x`).mode("always").viewport_from_layout().absolute().inset_0()));
   }

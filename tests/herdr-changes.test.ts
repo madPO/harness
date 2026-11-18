@@ -446,7 +446,8 @@ test("Changes native tree selection, constrained layout, and context scheduling 
   const script = `
     import { mock } from "bun:test";
     import assert from "node:assert/strict";
-    let rendering = false, queries = 0, drawn = [], nodes = [], focus, activeHandle;
+    import { unlinkSync } from "node:fs";
+    let rendering = false, lazyRendering = false, virtualHandles = 0, queries = 0, drawn = [], nodes = [], lazyRenders = [], focus, activeHandle;
     const spaces = [
       { id: "a", active: true, folder: "/same-startup", machine: null, tabs: [{ id: "ta" }] },
       { id: "b", active: false, folder: "/same-startup", machine: null, tabs: [{ id: "tb" }] },
@@ -469,7 +470,11 @@ test("Changes native tree selection, constrained layout, and context scheduling 
           data.children.push(value); if (value?.data) value.data.parent = node;
           if (typeof value === "string") drawn.push(value); return node;
         };
-        return (...args) => { data.styles[key] = args; return node; };
+        if (key === "children") return (values) => { for (const value of values) node.child(value); return node; };
+        return (...args) => {
+          if (String(key).startsWith("on_")) assert.equal(lazyRendering, false, "handler registration inside native lazy callback: " + String(key));
+          data.styles[key] = args; return node;
+        };
       } });
       nodes.push(node); return node;
     };
@@ -489,11 +494,14 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     mock.module("gpui-base", () => ({
       h_flex: () => element("h_flex"), v_flex: () => element("v_flex"),
       Checkbox: { new: (id) => element("checkbox").id(id) }, TextareaState: Input, Textarea: { new: () => element("textarea") },
-      VirtualListScrollHandle: { new: () => ({ release() {}, scroll_to_item() {} }) },
-      Scrollbar: { vertical: () => element("vertical-scrollbar"), horizontal: () => element("horizontal-scrollbar") },
-      v_virtual_list: (id, count, height, _key, render) => {
+      VirtualListScrollHandle: { new: () => { virtualHandles++; return { release() {}, scroll_to_item() {} }; } },
+      Scrollbar: { vertical: () => element("vertical-scrollbar"), horizontal: (id) => element("horizontal-scrollbar").scroll_target(id) },
+      v_virtual_list: (id, count, height, _key, draw) => {
         const list = element("virtual-list").id(id).row_height(height);
-        for (const row of render({ start: 0, end: count })) list.child(row);
+        lazyRenders.push(() => {
+          lazyRendering = true;
+          try { list.children(draw({ start: 0, end: count })); } finally { lazyRendering = false; }
+        });
         return list;
       },
     }));
@@ -531,13 +539,20 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     const settle = async () => { while (pending.length) await Promise.all(pending.splice(0)); };
     const flush = async () => { for (const timer of once.splice(0)) if (!timer.cancelled) timer.callback(cx); await settle(); };
     const tick = async () => { for (const timer of repeat) if (!timer.cancelled) timer.callback(cx); await flush(); };
+    const layoutLazyLists = () => { for (const draw of lazyRenders.splice(0)) draw(); };
+    // Static imports would resolve unavailable platform modules before these native mocks register.
+    const { v_virtual_list } = await import("gpui-base");
+    for (const handler of ["on_click", "on_mouse_down", "on_change", "on_key_down", "on_hover", "on_scroll_wheel", "on_size_change"]) {
+      v_virtual_list("guard-" + handler, 1, 24, () => "row", () => [element()[handler](() => {})]);
+      assert.throws(layoutLazyLists, /handler registration inside native lazy callback/, handler + " must respect native layout restrictions");
+    }
     // Register mocks before dynamically importing this platform-only module.
     // Assertions inspect render structure, not native GPUI pixels.
     const { default: Changes } = await import(${JSON.stringify(new URL("../herdr/mods/t3-changes/main.js", import.meta.url).href)});
     const view = new Changes(); view.init({}, cx); await settle();
     const render = () => {
-      drawn = []; nodes = []; rendering = true;
-      try { return view.render(cx); } finally { rendering = false; }
+      drawn = []; nodes = []; lazyRenders = []; rendering = true;
+      try { const root = view.render(cx); layoutLazyLists(); return root; } finally { rendering = false; }
     };
     const byId = (suffix) => {
       const node = nodes.find(node => node.data.styles.id?.[0] === view.id + suffix);
@@ -567,15 +582,27 @@ test("Changes native tree selection, constrained layout, and context scheduling 
       assert.equal(footer.data.kind, "v_flex"); assert.deepEqual(footer.data.styles.flex_none, []);
       const tree = column.data.children.at(-1), viewport = tree.data.children[1];
       assert.deepEqual(tree.data.styles.flex_1, []); assert.deepEqual(tree.data.styles.min_h, [0]);
-      assert.deepEqual(viewport.data.styles.flex_1, []); assert.deepEqual(viewport.data.styles.min_h, [0]);
+      assert.deepEqual(viewport.data.styles.flex_1, []); assert.deepEqual(viewport.data.styles.min_h, [24]);
       assert.deepEqual(byId("-tree-x").data.styles.absolute, []);
       assert.deepEqual(byId("-tree-x").data.styles.inset_0, []);
       const available = height - footer.data.styles.h[0] - column.data.children[0].data.styles.h[0]
         - tree.data.children[0].data.styles.h[0] - tree.data.children[2].data.styles.h[0];
       assert(available >= 24, "normal sidebar height must reserve at least one complete file row");
-      assert(drawn.includes("tracked.txt") && drawn.includes("first-only.txt") && drawn.includes("nested.txt"));
+      emit(byId("-tree-y"), "on_size_change", { width, height: available });
+      render();
+      const visible = byId("-tree-y");
+      assert.deepEqual(visible.data.styles.overflow_hidden, []);
+      assert.deepEqual(visible.data.styles.size_full, []);
+      assert(visible.data.children.length > 0 && visible.data.children.length <= Math.ceil(available / 24) + 1);
+      assert(visible.data.children.every(row => typeof row.data.styles.on_click?.[0] === "function"),
+        "visible rows must register handlers during ordinary render");
+      if (available >= 96) assert(drawn.includes("tracked.txt") && drawn.includes("first-only.txt") && drawn.includes("nested.txt"));
       assert(nodes.some(node => node.data.kind === "textarea"));
-      assert.equal(nodes.filter(node => node.data.kind === "virtual-list").length, 1);
+      assert.equal(nodes.filter(node => node.data.kind === "virtual-list").length, 0);
+      assert.equal(virtualHandles, 0, "ordinary-render lists must not allocate native lazy-list handles");
+      assert.equal(nodes.filter(node => node.data.kind === "vertical-scrollbar").length, 0);
+      assert.equal(nodes.filter(node => node.data.kind === "horizontal-scrollbar").length, 1);
+      assert.equal(nodes.find(node => node.data.kind === "horizontal-scrollbar").data.styles.scroll_target[0], view.id + "-tree-x");
       assert(!nodes.some(node => String(node.data.styles.id?.[0]).includes("-diff")));
       assert(!nodes.some(node => /preview/i.test(node.data.styles.accessibility_label?.[0] ?? "")));
       for (const content of ["first native edit", "first-only content", "nested private content"]) assert(!drawn.includes(content));
@@ -607,6 +634,37 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     view.controller.busy = true; emit(byId("-row-file-tracked.txt"), "on_click");
     assert(view.controller.checked.has("tracked.txt")); view.controller.busy = false;
     assert.equal(queries, beforeSelection, "all inclusion interactions must remain content-free");
+    const many = Array.from({ length: 180 }, (_, i) => "many-" + String(i).padStart(3, "0") + ".txt");
+    for (const path of many) await Bun.write(${JSON.stringify(first.cwd)} + "/" + path, "unselected fixture content\\n");
+    await view.controller.refresh(); render();
+    emit(byId("-tree-y"), "on_size_change", { width: 640, height: 96 }); render();
+    assert.equal(byId("-tree-y").data.children.length, 4, "only the measured visible window should build interactive rows");
+    assert(!drawn.includes("many-179.txt") && !drawn.includes("tracked.txt"));
+    view.handles.tree.focus(); key("end"); render();
+    assert(drawn.includes("tracked.txt"), "End must reveal the offscreen final file");
+    assert.equal(view.scrollTop[view.id + "-tree-y"], (view.rows().length - 4) * 24);
+    const beforeWheel = queries, highlighted = view.treeAt, endTop = view.scrollTop[view.id + "-tree-y"];
+    assert(emit(byId("-tree-y"), "on_scroll_wheel", { delta: { x: 0, y: 48 } }));
+    render(); assert.equal(view.scrollTop[view.id + "-tree-y"], endTop - 48);
+    assert.equal(view.treeAt, highlighted, "wheel movement must not move keyboard selection");
+    render(); assert.equal(view.scrollTop[view.id + "-tree-y"], endTop - 48, "selection must not snap the wheel back");
+    key("home"); render(); assert.equal(view.scrollTop[view.id + "-tree-y"], 0);
+    assert(drawn.includes("first-only.txt") && !drawn.includes("tracked.txt"), "Home must reveal the first row");
+    const wheel = byId("-tree-y");
+    emit(wheel, "on_scroll_wheel", { delta: { x: 0, y: -48 } });
+    emit(wheel, "on_scroll_wheel", { delta: { x: 0, y: -48 } });
+    render(); assert.equal(view.scrollTop[view.id + "-tree-y"], 96, "trackpad events must accumulate before rendering");
+    assert(drawn.includes("many-003.txt") && !drawn.includes("first-only.txt"));
+    const visibleBox = nodes.find(node => node.data.kind === "checkbox" && node.data.styles.id[0].includes("-check-many-"));
+    const visiblePath = visibleBox.data.styles.id[0].split("-check-")[1];
+    const included = view.controller.checked.has(visiblePath);
+    emit(visibleBox, "on_change", !included); render();
+    assert.equal(view.controller.checked.has(visiblePath), !included, "wheeled rows must retain working native checkboxes");
+    assert.equal(view.scrollTop[view.id + "-tree-y"], 96, "inclusion changes must preserve the wheel position");
+    assert.equal(queries, beforeWheel, "wheel and keyboard navigation must remain content-free");
+    for (const path of many) unlinkSync(${JSON.stringify(first.cwd)} + "/" + path);
+    await view.controller.refresh(); render();
+    emit(byId("-tree-y"), "on_size_change", { width: 1440, height: 240 }); render();
     const initialQueries = queries;
     for (let i = 0; i < 12; i++) { render(); await tick(); }
     assert.equal(queries, initialQueries, "stable focus must not poll Git");
