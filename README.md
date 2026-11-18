@@ -240,11 +240,13 @@ Use **Refresh** to reread branches after external Git changes.
 Refresh does not fetch from remotes or access the network.
 
 In the branch tree, use Up and Down to navigate, and Left and Right to collapse or expand folders.
+Remote origin folders start collapsed; refresh preserves your folder choices.
 Enter selects a branch or toggles a folder; Space pins or unpins the focused branch.
 Shift+F10 or the context-menu key opens actions for the focused branch.
 In the menu, arrows navigate, Enter activates an action, and Escape closes the menu.
 Tab reaches dialog inputs and buttons; Escape cancels before execution.
-Long names remain accessible through horizontal scrolling.
+Long branch and folder names truncate to keep **Current** and **Pin** or **Unpin** visible.
+Accessible branch labels retain the full name.
 Install updates by copying `t3-branches/`, updating `t3-chrome/`, and merging the layout's `branches` block.
 Preserve the `branches` block ID and its `t3-branches` content mod.
 Native Branches rendering, contrast across themes, and platform keyboard behavior still require verification in Herdr App.
@@ -256,7 +258,7 @@ Branches and Changes render interactive rows during the normal view render, usin
 Herdr forbids registering row handlers inside native virtual-list callbacks, which execute during layout.
 See the [native list contract](https://github.com/herdrdev/herdr-app/blob/8e1208deeff2a24441a192974e648c6fa0c5053c/vendor/gpui-kit/crates/shell/src/typings.rs#L2980-L3000).
 Copy each complete mod directory when updating, including its local `list.js`.
-Use the mouse wheel or keyboard to scroll vertically; the horizontal scrollbar exposes long names.
+Use the mouse wheel or keyboard to scroll vertically.
 
 Select **Changes** in the right-side panel to prepare a commit in the focused terminal's repository.
 All changed files appear once in a directory tree.
@@ -280,7 +282,7 @@ Checkboxes choose additional working-tree changes; amend also supports message-o
 Unchecking **Amend** restores the normal commit draft and removes previous-only files from the list.
 Amend requires an existing commit.
 
-Changes keeps T3 Files' compact rows, file-type icons, expandable folders, and status badges.
+Changes keeps T3 Files' compact rows, file-type icons, and expandable folders.
 The tree supports horizontal and vertical scrolling.
 Long filenames remain readable through horizontal scrolling rather than permanent truncation.
 The file list fills the panel width, with the commit editor below.

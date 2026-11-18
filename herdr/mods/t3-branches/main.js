@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { h_flex, v_flex, Scrollbar } from "gpui-base";
+import { h_flex, v_flex } from "gpui-base";
 import { spaces, panes, focused, exec, theme, props, shared, setShared, openOverlay } from "herdr";
 import { BranchesController } from "./controller.js";
 import { branchTree, treeRows, contextKey, repositoryKey } from "./model.js";
@@ -11,7 +11,7 @@ import { scrollList } from "./list.js";
 
 const MOD = "mods/t3-branches";
 // Match Changes' compact native tree and control scale.
-const UI = { row: 24, header: 36, text: 12, radius: 5, scrollbar: 16, pad: 6.4, gap: 4.8, level: 27.2 };
+const UI = { row: 24, header: 36, text: 12, radius: 5, pad: 6.4, gap: 4.8, level: 27.2 };
 const location = () => resolveContext(spaces(), panes(), focused());
 const pinKey = (key) => `pins.v1:${key}`;
 const problem = (error) => error instanceof Error ? error.message : String(error);
@@ -23,6 +23,7 @@ class Branches {
     this.handles = Object.fromEntries(["refresh", "tree", "pin"].map((id) => [id, cx.focus_handle()]));
     this.treeReveal = null;
     this.collapsed = new Set();
+    this.seenRemoteFolders = new Set();
     this.visibleRows = [];
     this.treeAt = 0;
     this.selectedRef = null;
@@ -155,7 +156,14 @@ class Branches {
   syncRows() {
     const before = this.visibleRows[this.treeAt];
     const previousAt = this.treeAt;
-    const rows = treeRows(branchTree(this.controller.snapshot?.branches ?? [], this.controller.pins), this.collapsed);
+    const tree = branchTree(this.controller.snapshot?.branches ?? [], this.controller.pins);
+    for (const node of tree[2].children) {
+      if (node.children && !this.seenRemoteFolders.has(node.id)) {
+        this.seenRemoteFolders.add(node.id);
+        this.collapsed.add(node.id);
+      }
+    }
+    const rows = treeRows(tree, this.collapsed);
     let kept = before ? rows.findIndex((row) => row.id === before.id) : -1;
     if (kept < 0 && before?.branch) kept = rows.findIndex((row) => row.branch?.ref === before.branch.ref);
     this.visibleRows = rows;
@@ -164,7 +172,6 @@ class Branches {
       this.treeReveal = this.treeAt;
     }
     if (!this.controller.snapshot?.branches.some((branch) => branch.ref === this.selectedRef)) this.selectedRef = null;
-    this.treeWidth = rows.reduce((width, row) => Math.max(width, 220 + row.depth * UI.level + row.name.length * UI.text), 240);
   }
 
   moveTo(at) {
@@ -248,7 +255,7 @@ class Branches {
       h_flex().gap(4).items_center()
         .child(svg(`${MOD}/icons/pin.svg`).size(12).flex_none())
         .child(pinned ? "Unpin" : "Pin"), () => this.togglePin(row), c.loading, at === this.treeAt, `pin-${row.id}`) : null;
-    return h_flex().id(`${this.id}-row-${row.id}`).h(UI.row).mx(2).pl(UI.pad + row.depth * UI.level).pr(UI.pad)
+    return h_flex().id(`${this.id}-row-${row.id}`).h(UI.row).mx(2).px(UI.pad).min_w(0)
       .gap(UI.gap).items_center().rounded(UI.radius).text_size(UI.text).relative()
       .when(on, (el) => el.bg(t.selected).font_medium()).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
       .role("tree_item").accessibility_label(`${label}${on ? ", selected" : ""}`).cursor_pointer()
@@ -256,10 +263,12 @@ class Branches {
       .when(Boolean(branch), (el) => el.on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation(); this.openMenu(row, at, cx);
       }))
-      .child(div().size(16).flex_none().flex().items_center().justify_center()
-        .when(!branch, (el) => el.child(svg(`${MOD}/icons/chevron-${open ? "down" : "right"}.svg`).size(12).text_color(t.muted))))
-      .child(svg(`${MOD}/icons/${branch ? "branch" : "folder"}.svg`).size(16).flex_none().text_color(t.muted))
-      .child(div().flex_1().whitespace_nowrap().child(row.name))
+      .child(h_flex().flex_1().min_w(0).overflow_hidden().gap(UI.gap).items_center()
+        .child(div().w(row.depth * UI.level).min_w(0).flex_shrink(1))
+        .child(div().size(16).flex_none().flex().items_center().justify_center()
+          .when(!branch, (el) => el.child(svg(`${MOD}/icons/chevron-${open ? "down" : "right"}.svg`).size(12).text_color(t.muted))))
+        .child(svg(`${MOD}/icons/${branch ? "branch" : "folder"}.svg`).size(16).flex_none().text_color(t.muted))
+        .child(div().flex_1().min_w(0).truncate().child(row.name)))
       .when(Boolean(branch?.current), (el) => el.child(h_flex().gap(4).items_center().flex_none().text_color(t.foreground).text_size(11)
         .child(svg(`${MOD}/icons/check.svg`).size(12)).child("Current")))
       .when(Boolean(pin), (el) => el.child(pin))
@@ -276,14 +285,11 @@ class Branches {
     if (this.listHeight?.[id] !== undefined) this.treeReveal = null;
     return v_flex().w_full().flex_1().min_h(0).min_w(0)
       .child(div().flex_1().min_h(0).min_w(0).relative()
-        .child(div().id(`${this.id}-tree-x`).size_full().min_w(0).overflow_x_scroll()
-          .child(div().w_full().min_w(this.treeWidth).h_full().track_focus(this.handles.tree).tab_index(0)
-            .role("tree").accessibility_label("Branches. Arrows navigate, Enter selects or expands, Space pins a branch. Shift+F10 opens branch actions. Tab reaches the focused branch's Pin button. Selecting never checks out a branch.")
-            .on_key_down((e, cx) => this.treeKey(e, cx))
-            .on_scroll_wheel((_e, cx) => cx.stop_propagation())
-            .child(list.size_full()))))
-      .child(div().w_full().min_w(0).h(UI.scrollbar).flex_none().relative()
-        .child(Scrollbar.horizontal(`${this.id}-tree-x`).mode("always").viewport_from_layout().absolute().inset_0()));
+        .child(div().size_full().min_w(0).track_focus(this.handles.tree).tab_index(0)
+          .role("tree").accessibility_label("Branches. Arrows navigate, Enter selects or expands, Space pins a branch. Shift+F10 opens branch actions. Tab reaches the focused branch's Pin button. Selecting never checks out a branch.")
+          .on_key_down((e, cx) => this.treeKey(e, cx))
+          .on_scroll_wheel((_e, cx) => cx.stop_propagation())
+          .child(list.size_full())));
   }
 
   stateMessage() {

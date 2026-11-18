@@ -3,7 +3,7 @@ import { h_flex, v_flex, Checkbox, Textarea, TextareaState, Scrollbar } from "gp
 import { spaces, panes, focused, exec, theme, settings, setShared } from "herdr";
 import { ChangesController } from "./controller.js";
 import { displayPath, repositoryKey, fileTree, treeRows } from "./model.js";
-import { TREE_ROW, treeRow, statusBadge } from "./tree-row.js";
+import { TREE_ROW, treeRow } from "./tree-row.js";
 import { resolveContext } from "./context.js";
 import { scrollList } from "./list.js";
 
@@ -21,7 +21,9 @@ export default class Changes extends View {
     this.messageState.set_soft_wrap(true);
     this.controller = new ChangesController({ exec, location, changed: () => {
       this.syncMessage();
-      for (const row of treeRows(fileTree(this.controller.files()), new Set(), "changes")) {
+      const rows = treeRows(fileTree(this.controller.files()), new Set(), "changes");
+      if (this.activeRow && !rows.some((row) => this.rowKey(row) === this.activeRow)) this.activeRow = null;
+      for (const row of rows) {
         const id = row.file ? `check-${row.path}` : `folder-${row.path}`;
         if (!this.handles[id]) this.handles[id] = cx.focus_handle();
       }
@@ -61,6 +63,7 @@ export default class Changes extends View {
 
   requestContext(cx) {
     if (!this.controller.transition()) return false;
+    this.activeRow = null;
     this.rollbackRequest = null;
     if (!this.contextWork) this.contextWork = cx.timer.after(0, (cx) => {
       this.contextWork = null;
@@ -99,7 +102,10 @@ export default class Changes extends View {
     return treeRows(fileTree(this.controller.files()), this.collapsed, "changes");
   }
 
+  rowKey(row) { return `${row.file ? "file" : "folder"}:${row.path}`; }
+
   activateRow(row, cx) {
+    this.activeRow = this.rowKey(row);
     if (!row.file) this.toggle(this.collapsed, `changes:${row.path}`);
     else this.toggleFiles([row.path]);
     cx.notify();
@@ -127,19 +133,19 @@ export default class Changes extends View {
     const rows = this.rows(), c = this.controller, files = c.files(), locked = c.busy || c.loading;
     const treeTheme = { ...t, dim: t.muted, ring: t.accent };
     const at = Math.max(0, Math.min(this.treeAt, rows.length - 1));
-    const width = rows.reduce((max, row) => Math.max(max, 144 + row.depth * 27.2 + displayPath(row.name).length * UI.text), 240);
+    // Row margins, padding, borders, chevron, checkbox, icon and three gaps.
+    const width = rows.reduce((max, row) => Math.max(max, 91.2 + row.depth * 27.2 + displayPath(row.name).length * UI.text * 0.6), 0);
     const pathsOf = (row) => row.file ? [row.path] : files.filter((file) => file.path.startsWith(`${row.path}/`)).map((file) => file.path);
     const draw = (row, i) => {
       const paths = pathsOf(row), count = paths.filter((path) => c.checked.has(path)).length;
       const open = !this.collapsed.has(`changes:${row.path}`);
       return treeRow(treeTheme, "mods/t3-files",
         { name: displayPath(row.name), path: row.path, depth: row.depth, dir: !row.file, open }, `${this.id}-row-${row.file ? "file" : "folder"}-${row.path}`,
-        { truncate: false, selected: count === paths.length,
+        { truncate: false, selected: this.activeRow === this.rowKey(row),
           focused: this.handles.tree.is_focused() && i === at,
           leading: this.checkbox(t, row.file ? `check-${row.path}` : "folder-" + row.path,
             `${count && count !== paths.length ? "Partially selected. " : ""}Include ${displayPath(row.path)}`, count === paths.length,
-            () => this.toggleFiles(paths), { disabled: locked, partial: count > 0 && count < paths.length }),
-          trailing: row.file ? statusBadge(row.file.status).when(row.file.conflict, (el) => el.text_color(t.ansi1)) : null })
+            () => { this.activeRow = this.rowKey(row); this.toggleFiles(paths); }, { disabled: locked, partial: count > 0 && count < paths.length }) })
         .role("button").accessibility_label(row.file ? `${c.checked.has(row.path) ? "Exclude" : "Include"} ${displayPath(row.path)}, ${row.file.conflict ? "unresolved conflict" : row.file.status}` : `${open ? "Collapse" : "Expand"} folder ${displayPath(row.path)}`)
         .cursor_pointer().on_click((_e, cx) => { this.handles.tree.focus(); this.treeAt = i; this.activateRow(row, cx); });
     };
@@ -163,7 +169,7 @@ export default class Changes extends View {
                 this.treeAt = e.key === "home" ? 0 : e.key === "end" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, at + (e.key === "down" ? 1 : -1)));
                 this.treeReveal = this.treeAt;
               } else if (e.key === "enter") this.activateRow(row, cx);
-              else if (e.key === "space" && !locked) this.toggleFiles(pathsOf(row));
+              else if (e.key === "space" && !locked) { this.activeRow = this.rowKey(row); this.toggleFiles(pathsOf(row)); }
               else if (["left", "right"].includes(e.key) && !row.file) {
                 if (e.key === "left") this.collapsed.add(`changes:${row.path}`); else this.collapsed.delete(`changes:${row.path}`);
               } else return;

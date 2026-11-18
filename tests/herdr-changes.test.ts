@@ -572,6 +572,10 @@ test("Changes native tree selection, constrained layout, and context scheduling 
       const tree = nodes.find(node => node.data.styles.accessibility_label?.[0]?.startsWith("Changed files."));
       return emit(tree, "on_key_down", { key: value });
     };
+    const onlySelected = (suffix) => {
+      const rows = nodes.filter(node => node.data.styles.id?.[0]?.startsWith(view.id + "-row-"));
+      assert.deepEqual(rows.filter(node => node.data.styles.bg?.[0] === "#1122331f").map(node => node.data.styles.id[0]), [view.id + suffix]);
+    };
     assert.equal(view.controller.snapshot.space, "a");
     view.controller.setDraft("Draft from A");
     for (const [width, height] of [[320, 300], [640, 480], [1440, 600]]) {
@@ -618,6 +622,7 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     emit(byId("-row-file-tracked.txt"), "on_click"); render();
     assert.equal(view.controller.checked.has("tracked.txt"), true);
     assert.equal(byId("-check-tracked.txt").data.styles.checked[0], true);
+    onlySelected("-row-file-tracked.txt");
     assert.equal(byId("-commit").data.styles.disabled[0], false, "explicit file inclusion must enable a valid commit");
     key("enter"); render(); assert.equal(view.controller.checked.has("tracked.txt"), false);
     key("space"); render(); assert.equal(view.controller.checked.has("tracked.txt"), true);
@@ -632,11 +637,27 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     assert.equal(byId("-check-tracked.txt").data.styles.checked[0], true);
     const focusedRow = byId("-row-file-tracked.txt");
     assert.equal(focusedRow.data.styles.border_color[0], "#112233", "keyboard focus must retain a ring");
-    assert.equal(focusedRow.data.styles.bg[0], "#1122331f", "included rows must show checked selection styling");
+    assert.equal(focusedRow.data.styles.bg[0], "#1122331f", "direct interaction must highlight the acted-on row");
     emit(byId("-row-folder-src"), "on_click"); render(); assert(!drawn.includes("nested.txt"));
     key("enter"); render(); assert(drawn.includes("nested.txt"));
-    emit(byId("-folder-src"), "on_change", true); render(); assert(view.controller.checked.has("src/nested.txt"));
+    emit(byId("-folder-src"), "on_change", true); render();
+    assert(view.controller.checked.has("src/nested.txt"));
+    assert.equal(byId("-check-src/nested.txt").data.styles.checked[0], true);
+    assert.equal(byId("-check-tracked.txt").data.styles.checked[0], true);
+    onlySelected("-row-folder-src");
+    emit(byId("-check-src/nested.txt"), "on_change", false); render();
+    assert(!view.controller.checked.has("src/nested.txt"));
+    assert.equal(byId("-folder-src").data.styles.checked[0], false);
+    onlySelected("-row-file-src/nested.txt");
+    emit(byId("-folder-src"), "on_change", true); render();
+    assert(view.controller.checked.has("src/nested.txt")); onlySelected("-row-folder-src");
     emit(byId("-folder-src"), "on_change", false); render(); assert(!view.controller.checked.has("src/nested.txt"));
+    onlySelected("-row-folder-src");
+    key("down"); render(); onlySelected("-row-folder-src");
+    key("space"); render(); onlySelected("-row-file-src/nested.txt");
+    assert(view.controller.checked.has("src/nested.txt"));
+    key("enter"); render(); assert(!view.controller.checked.has("src/nested.txt"));
+    onlySelected("-row-file-src/nested.txt");
     emit(byId("-all"), "on_change", true); render(); assert.equal(view.controller.checked.size, 3);
     emit(byId("-all"), "on_change", false); render(); assert.equal(view.controller.checked.size, 0);
     emit(byId("-all"), "on_change", true); render(); assert.equal(view.controller.checked.size, 3);
@@ -671,23 +692,28 @@ test("Changes native tree selection, constrained layout, and context scheduling 
     const included = view.controller.checked.has(visiblePath);
     emit(visibleBox, "on_change", !included); render();
     assert.equal(view.controller.checked.has(visiblePath), !included, "wheeled rows must retain working native checkboxes");
+    onlySelected("-row-file-" + visiblePath);
     assert.equal(view.scrollTop[view.id + "-tree-y"], 96, "inclusion changes must preserve the wheel position");
     assert.equal(queries, beforeWheel, "wheel and keyboard navigation must remain content-free");
     for (const path of many) unlinkSync(${JSON.stringify(first.cwd)} + "/" + path);
     await view.controller.refresh(); render();
+    assert.equal(view.activeRow, null, "removing the active row must clear its highlight");
     emit(byId("-tree-y"), "on_size_change", { width: 1440, height: 240 }); render();
     const initialQueries = queries;
     for (let i = 0; i < 12; i++) { render(); await tick(); }
+    emit(byId("-row-file-tracked.txt"), "on_click"); render(); onlySelected("-row-file-tracked.txt");
     assert.equal(queries, initialQueries, "stable focus must not poll Git");
     view.controller.error = "Old context error"; choose("b");
     const beforeSwitch = queries, beforeWrites = view.messageState.writes.length;
     render();
     assert.equal(queries, beforeSwitch); assert.equal(view.messageState.writes.length, beforeWrites);
     assert.equal(view.controller.snapshot, null); assert.equal(view.controller.checked.size, 0);
+    assert.equal(view.activeRow, null, "context transitions must clear the active row");
     assert(!drawn.includes("first-only.txt") && !drawn.includes("Old context error"));
     await flush(); render();
     assert.equal(view.controller.snapshot.space, "b"); assert.equal(view.messageState.value(), "");
     assert(drawn.includes("second-only.txt") && drawn.includes("tracked.txt")); assert(!drawn.includes("second native edit"));
+    assert.notEqual(byId("-row-file-tracked.txt").data.styles.bg?.[0], "#1122331f", "matching paths in another context must not inherit a highlight");
     choose("c"); render(); await flush();
     assert.equal(view.controller.snapshot.space, "c");
     assert.equal(view.messageState.value(), "Draft from A", "draft scope remains machine/repository");

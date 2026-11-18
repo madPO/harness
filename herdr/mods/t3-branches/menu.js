@@ -102,7 +102,7 @@ export class Menu {
 
   render() {
     const t = theme();
-    return v_flex().id("branch-actions-menu").track_focus(this.handle).w_full().min_h(0).max_h(520)
+    return v_flex().id("branch-actions-menu").track_focus(this.handle).w_full().h_full().min_h(0).max_h(520)
       .p(6).bg(t.popover).text_color(t.foreground).text_size(12).role("menu").accessibility_label("Branch actions")
       .on_key_down((e, cx) => {
         if (e.key === "escape" && !this.busy) closeOverlay(props().overlay);
@@ -115,7 +115,7 @@ export class Menu {
         else return;
         cx.stop_propagation(); cx.notify();
       })
-      .child(v_flex().min_h(0).overflow_y_scrollbar().children(this.items.map((item, i) => h_flex()
+      .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar().children(this.items.map((item, i) => h_flex()
         .id(`branch-action-${item.type}`).h(30).flex_none().px(8).rounded(5).items_center().relative()
         .role("menu_item").accessibility_label(item.label).disabled(Boolean(this.busy))
         .text_color(item.danger ? t.ansi1 : t.foreground)

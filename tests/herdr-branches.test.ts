@@ -433,7 +433,7 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
       TextareaState: { new: element }, Textarea: { new: element }, Checkbox: { new: element },
       VirtualListScrollHandle: { new: () => assert.fail("interactive trees must not allocate native virtual scroll handles") },
       Scrollbar: { vertical: () => assert.fail("manual rows have no native vertical scrollbar"),
-        horizontal: (id) => element().id("scrollbar:" + id) },
+        horizontal: () => assert.fail("branch trees must not allocate a horizontal scrollbar") },
       v_virtual_list: virtualList,
     }));
     mock.module("herdr", () => ({
@@ -556,6 +556,75 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
       return result.stdout.toString().trim();
     };
     const tip = fixtureGit(["rev-parse", "HEAD"]);
+    fixtureGit(["update-ref", "refs/remotes/origin/main", tip]);
+    fixtureGit(["update-ref", "refs/remotes/origin/team/topic", tip]);
+    fixtureGit(["update-ref", "refs/remotes/upstream/main", tip]);
+    const remoteView = await mount(), remotePart = remoteView.part;
+    const remoteFolder = (name) => remotePart.visibleRows.find(row =>
+      row.name === name && row.depth === 1 && row.children && row.id.includes('"remote"'));
+    const origin = remoteFolder("origin"), upstream = remoteFolder("upstream");
+    assert(origin && upstream, "remote origins must be visible beneath the expanded Remote root");
+    assert(remotePart.collapsed.has(origin.id) && remotePart.collapsed.has(upstream.id));
+    assert(!remotePart.visibleRows.some(row => row.branch?.kind === "remote"), "new origins start collapsed");
+    assert(remotePart.visibleRows.some(row => row.branch?.name === "main" && row.branch.kind === "local"),
+      "local branches remain expanded");
+    remotePart.activate(origin);
+    assert(remotePart.visibleRows.some(row => row.branch?.name === "origin/team/topic"),
+      "expanding an origin exposes nested folders with their existing defaults");
+    remotePart.activate(upstream);
+    remotePart.activate(upstream);
+    await remotePart.controller.refresh();
+    assert(!remotePart.collapsed.has(origin.id) && remotePart.collapsed.has(upstream.id),
+      "refresh preserves both expanded and collapsed choices");
+    fixtureGit(["update-ref", "refs/remotes/new-origin/main", tip]);
+    await remotePart.controller.refresh();
+    const newOrigin = remoteFolder("new-origin");
+    assert(newOrigin && remotePart.collapsed.has(newOrigin.id), "origins discovered on refresh start collapsed");
+    assert(!remotePart.collapsed.has(origin.id), "new origins do not reset existing choices");
+    fixtureGit(["update-ref", "-d", "refs/remotes/origin/main"]);
+    fixtureGit(["update-ref", "-d", "refs/remotes/origin/team/topic"]);
+    await remotePart.controller.refresh();
+    fixtureGit(["update-ref", "refs/remotes/origin/main", tip]);
+    await remotePart.controller.refresh();
+    assert(!remotePart.collapsed.has(remoteFolder("origin").id), "returning origins retain their earlier choice");
+    remoteView.close();
+    for (const ref of ["origin/main", "upstream/main", "new-origin/main"])
+      fixtureGit(["update-ref", "-d", "refs/remotes/" + ref]);
+    const longName = "a-very-long-branch-name-that-must-not-push-controls-out-of-view";
+    const deepName = "one/two/three/four/five/six/seven/eight/" + longName;
+    fixtureGit(["update-ref", "refs/heads/" + deepName, tip]);
+    values.set(key, saved);
+    const narrowView = await mount(), narrowPart = narrowView.part;
+    render(narrowView);
+    const narrowList = nodes.find(node => node.id === narrowPart.id + "-tree-y");
+    narrowList.handlers.on_size_change({ width: 180, height: 600 }, cx);
+    render(narrowView);
+    const assertBoundedRow = (label, name, depth, current, pinned) => {
+      const row = nodes.find(node => node.styles.role?.[0] === "tree_item" && node.label === label);
+      assert(row, "expected rendered row " + label);
+      const content = row.children[0].data;
+      assert("flex_1" in content.styles && content.styles.min_w?.[0] === 0 && "overflow_hidden" in content.styles);
+      const indent = content.children[0].data;
+      assert.equal(indent.styles.w[0], depth * 27.2);
+      assert.equal(indent.styles.min_w[0], 0);
+      assert.equal(indent.styles.flex_shrink[0], 1, "deep indentation must yield available space");
+      const text = content.children.find(child => child?.data?.children.includes(name))?.data;
+      assert(text && "truncate" in text.styles && text.styles.min_w?.[0] === 0 && "flex_1" in text.styles);
+      const pin = row.children.find(child => child?.data?.label === (pinned ? "Unpin" : "Pin") + " local branch " + (current ? "main" : deepName))?.data;
+      assert(pin && "flex_none" in pin.styles, "pin control must remain outside the clipped name area");
+      if (current) {
+        const marker = row.children.find(child => child?.data?.children.includes("Current"))?.data;
+        assert(marker && "flex_none" in marker.styles, "Current must remain outside the clipped name area");
+      }
+    };
+    const currentRow = narrowPart.visibleRows.find(row => row.branch?.name === "main" && row.id.includes("pinned/local"));
+    const deepRow = narrowPart.visibleRows.find(row => row.branch?.name === deepName);
+    assert(currentRow && deepRow && deepRow.depth > 8);
+    assertBoundedRow("local branch main, current branch, pinned", "main", currentRow.depth, true, true);
+    assertBoundedRow("local branch " + deepName, longName, deepRow.depth, false, false);
+    narrowView.close();
+    fixtureGit(["update-ref", "-d", "refs/heads/" + deepName]);
+    values.clear();
     const names = [...Array.from({ length: 140 }, (_, i) => "branch-" + String(i).padStart(3, "0")), "feature/nested/topic"];
     fixtureGit(["update-ref", "--stdin"], names.map(name => "create refs/heads/" + name + " " + tip).join("\\n") + "\\n");
     const view = await mount(), part = view.part, listId = part.id + "-tree-y";
@@ -574,8 +643,10 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     assert(drawn.includes("topic"), "loaded nested branch names must render");
     assert(!drawn.includes("branch-139"), "unmeasured rendering must remain bounded");
     assert(nodes.filter(node => node.styles.role?.[0] === "tree_item").length <= Math.ceil(2000 / 24));
-    assert(nodes.some(node => node.id === part.id + "-tree-x" && "overflow_x_scroll" in node.styles));
-    assert(nodes.some(node => node.id === "scrollbar:" + part.id + "-tree-x"));
+    assert(!nodes.some(node => node.id === part.id + "-tree-x" || "overflow_x_scroll" in node.styles),
+      "the branch tree must not require horizontal scrolling");
+    const treeViewport = nodes.find(node => node.styles.role?.[0] === "tree");
+    assert("size_full" in treeViewport.styles && treeViewport.styles.min_w?.[0] === 0);
     assert("size_full" in list().styles, "the list must use the full available tree viewport");
     part.handles.tree.focus();
     keyDown("end"); keyDown("up"); keyDown("up");
@@ -653,6 +724,15 @@ test("Branches native rows support interaction, scrolling, and pin storage outsi
     const menuItems = nodes.filter(node => node.styles.role?.[0] === "menu_item");
     assert(menuItems.some(node => node.label === "Copy branch name"), "branch action labels must render with native menu item roles");
     const menuRoot = nodes.find(node => node.styles.role?.[0] === "menu");
+    assert("h_full" in menuRoot.styles && menuRoot.styles.max_h?.[0] === 520,
+      "the popup menu must fill its bounded allocated height");
+    const menuList = menuRoot.children.find(child => child?.data && "overflow_y_scrollbar" in child.data.styles)?.data;
+    assert(menuList && "flex_1" in menuList.styles && menuList.styles.min_h?.[0] === 0,
+      "the scrolling list must receive the remaining bounded popup height");
+    assert(menuList.children.length === menuItems.length && menuItems.length > 0,
+      "the scrolling viewport must contain the rendered action items");
+    assert(menuItems.every(item => item.styles.h?.[0] === 30 && "flex_none" in item.styles),
+      "action rows retain nonzero height inside the scrolling viewport");
     menuRoot.handlers.on_key_down({ key: "down" }, cx);
     assert.equal(menuView.part.at, 1, "rendered branch actions must retain keyboard navigation");
     menuRoot.handlers.on_key_down({ key: "escape" }, cx);
