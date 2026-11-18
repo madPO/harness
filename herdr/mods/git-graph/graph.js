@@ -157,6 +157,7 @@ export class Graph {
     // Herdr's agents per machine, for a row's "New … tab" (as its + menu lists them).
     this.agents = new Map();
     this.handle = cx.focus_handle();
+    this.pushHandle = cx.focus_handle();
     this.reset();
     this.refresh(cx);
     cx.timer.after(1500, (cx) => this.warm(cx));
@@ -682,6 +683,11 @@ export class Graph {
       .when(Boolean(available()), (e) => e.child(h_flex().id("graph-update").h(24).px(7).gap(5).flex_none().items_center().rounded(6).text_size(11.5)
         .cursor_pointer().text_color(t.accent).hover((s) => s.bg(t.hover)).on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click(() => openUpdate()).child(div().size(6).rounded(3).bg(t.accent)).child("Update Graph")))
+      .when(ready && Boolean(this.ctx?.head && this.ctx?.current && this.ctx?.remotes?.length), (e) => e.child(
+        this.iconButton("graph-push", "push", "Push", false, () => openDialog({ type: "push", name: this.ctx.current }, this.ctx), t)
+          .accessibility_label("Push current branch").role("button").track_focus(this.pushHandle).tab_index(0)
+          .when(this.pushHandle.is_focused(), (el) => el.border(2).border_color(t.accent))
+          .on_key_down((event, cx) => { if (event.key === "enter" || event.key === "space") { openDialog({ type: "push", name: this.ctx.current }, this.ctx); cx.stop_propagation(); } })))
       .when(ready && this.remoteNames?.length > 0, (e) => e.child(this.iconButton("graph-fetch", "fetch", this.fetching ? "Fetching…" : null, false, (_e, cx) => this.fetch(cx), t)))
       .when(this.state === "workspace", (e) => {
         const run = this.fetchAll?.root === ws.root ? this.fetchAll : null;

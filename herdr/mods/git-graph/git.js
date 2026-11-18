@@ -251,8 +251,9 @@ export function dialogFor(action, ctx) {
         { value: "soft", label: "Soft", detail: "Keep every change, staged" },
         { value: "mixed", label: "Mixed", detail: "Keep every change, unstaged" },
         { value: "hard", label: "Hard", detail: "Discard every change", danger: true }] } };
-    case "push": return { title: "Push branch", detail: `Push ${a.name}.`, choice: remoteChoice(ctx),
-      checks: [{ id: "upstream", label: "Set as upstream", value: true }], confirm: "Push" };
+    case "push": return { title: "Push branch", detail: `Push ${a.name} to refs/heads/${a.name} on the selected remote.`, choice: remoteChoice(ctx),
+      checks: [{ id: "upstream", label: "Set as upstream", value: true },
+        { id: "force", label: "Force push with lease", value: false }], confirm: "Push" };
     case "pushTag": return { title: "Push tag", detail: `Push the tag ${a.name}.`, choice: remoteChoice(ctx), confirm: "Push" };
     case "commit": return { title: "Commit", detail: ctx.current ? `Commit to ${ctx.current}.` : "You're on a detached HEAD: the commit belongs to no branch until you create one.",
       inputs: [{ id: "message", label: "Message", value: "", text: true }],
@@ -330,7 +331,16 @@ export function commandsFor(a, v = {}, ctx = {}) {
     case "cherryPick": return [["cherry-pick", ...(a.merge ? ["-m", "1"] : []), a.hash]];
     case "revert": return [["revert", "--no-edit", ...(a.merge ? ["-m", "1"] : []), a.hash]];
     case "reset": return [["reset", `--${v.mode}`, a.hash]];
-    case "push": return [["push", ...(v.upstream ? ["--set-upstream"] : []), v.remote, a.name]];
+    case "push": {
+      const ref = `refs/heads/${a.name}`;
+      if (v.force && (!objectId(v.lease?.head) || !objectId(v.lease?.remoteHead) || v.lease.remote !== v.remote || v.lease.branch !== a.name)) {
+        throw new Error("Force push requires a fresh confirmation.");
+      }
+      return [["-c", "push.followTags=false", "push", "--no-follow-tags",
+        ...(v.upstream && !v.force ? ["--set-upstream"] : []),
+        ...(v.force ? [`--force-with-lease=${ref}:${v.lease.remoteHead}`] : []),
+        "--", v.remote, `${v.force ? v.lease.head : ref}:${ref}`]];
+    }
     case "pushTag": return [["push", v.remote, `refs/tags/${a.name}`]];
     // The message is -m's own argument, so one starting with "-" stays a message.
     case "commit": return [...(v.all ? [["add", "--all"]] : []), ["commit", "-m", message]];

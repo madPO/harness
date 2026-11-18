@@ -308,6 +308,14 @@ Successful local commits clear only an unchanged draft, preserving text entered 
 
 Git Graph runs Git on the focused repository's machine and reads untracked files for diffs. Manygit scans folders and periodically checks listed repositories; Git status can run repository-configured clean filters. Fetch, pull, push, and remote branch deletion can access the network. Git actions can change repositories, including destructive resets; review each action's confirmation. Local branch checkout and Fetch run without confirmation.
 
+Git Graph's **Push** button sends the current branch to the same-named branch on the selected remote.
+The Manygit push action uses the same dialog.
+Choose whether to set upstream; Git errors remain visible in the dialog.
+Force push requires a separate confirmation and can discard remote commits.
+It uses an explicit lease captured from the remote before confirmation and rejects a changed remote tip.
+Force push requires one push URL and an existing remote branch.
+Concurrent local Git operations can still race with preflight checks.
+
 Changes runs Git through argument arrays on the focused repository's machine, including remote machines.
 Status reads disable optional index locks and fsmonitor.
 Changes does not load file-content diffs.
