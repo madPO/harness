@@ -1,14 +1,14 @@
 modelRoles:
   default: openai-codex/gpt-6.1-terra:high
   smol: openai-codex/gpt-6-luna:high
-  slow: openai-codex/gpt-6.1-sol:medium
-  plan: openai/gpt-6.1-sol:medium
-  vision: openai/gpt-6.1-sol:medium
-  designer: openai/gpt-6.1-sol:medium
+  slow: openai-codex/gpt-6.2-sol:medium
+  plan: openai/gpt-6.2-sol:medium
+  vision: openai/gpt-6.2-sol:medium
+  designer: openai/gpt-6.2-sol:medium
   commit: openai/gpt-6-luna:low
   task: openai/gpt-6-luna:high
   tiny: openai/gpt-6-luna:low
-  advisor: openai-codex/gpt-6.1-sol:medium
+  advisor: openai-codex/gpt-6.2-sol:medium
 
 advisor:
   enabled: false
@@ -28,13 +28,13 @@ retry:
       - openai/gpt-6-luna:high
       - openai/gpt-6.1-terra:medium
     slow:
-      - openai/gpt-6.1-sol:medium
+      - openai/gpt-6.2-sol:medium
       - openai/gpt-6.1-terra:xhigh
     plan:
-      - openai/gpt-6.1-sol:medium
+      - openai/gpt-6.2-sol:medium
       - openai/gpt-6.1-terra:xhigh
     advisor:
-      - openai/gpt-6.1-sol:medium
+      - openai/gpt-6.2-sol:medium
       - openai/gpt-6.1-terra:xhigh
 
 statusLine:
