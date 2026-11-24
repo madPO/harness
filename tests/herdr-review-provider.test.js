@@ -5,11 +5,15 @@ const flags = [
   "--print", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
   "--no-skills", "--no-rules", "--no-context-files", "--no-prewalk", "--no-title", "--no-lsp",
 ];
-const programs = [
-  { key: "review-omp-confined", name: "Confined OMP", run: ["/usr/bin/nono", "run", "--profile", "omp", "--", "/usr/bin/omp"], installed: true },
-  { key: "review-omp-alt", name: "Alternate OMP", run: ["/opt/Review Tools/omp-sandbox", "isolated workspace", ""], installed: true },
+const actions = [
+  { id: "confined", name: "Confined OMP", command: "nono run --profile omp -- omp", icon: "play", place: "down", cwd: "/ignored" },
+  { id: "alternate", name: "review-omp-alternate", command: '"/opt/Review Tools/omp-sandbox" "isolated workspace" ""', place: "tab" },
 ];
-const launchers = reviewLaunchers(programs);
+const commands = [
+  ["nono", "run", "--profile", "omp", "--", "omp"],
+  ["/opt/Review Tools/omp-sandbox", "isolated workspace", ""],
+];
+const launchers = reviewLaunchers(actions);
 const launcher = launchers[0];
 const location = { on: "linux-core", cwd: "/work/repo with spaces" };
 const file = { path: "lib/rates.js", status: "M" };
@@ -51,28 +55,61 @@ function requestData(input) {
 const runResult = (result) => runAnalysis(transport(result).exec, launcher, location, snapshot);
 
 describe("Review Assistant launcher discovery", () => {
-  test("preserves each distinct trusted wrapper and appends the exact worker flags", () => {
-    expect(launchers).toEqual(programs.map(({ key, name, run }) => ({ key, name, argv: [...run, ...flags] })));
-    expect(launchKey(launcher)).toBe(launchKey(reviewLaunchers(programs)[0]));
-    for (const updated of [{ key: "review-omp-new" }, { name: "New name" }, { argv: [...launcher.argv, "other"] }]) {
-      expect(launchKey({ ...launcher, ...updated })).not.toBe(launchKey(launcher));
-    }
-    expect(launchKey(launcher)).not.toBe(launchKey(launchers[1]));
+  test("preserves Action order and appends the exact worker flags to PATH and opaque wrappers", () => {
+    expect(launchers).toEqual(actions.map(({ id, name }, i) => ({ key: id, name, argv: [...commands[i], ...flags] })));
   });
 
-  test("only accepts installed opt-ins with exact absolute Linux command argv", () => {
+  test("decodes POSIX quoting and preserves empty and escaped literal arguments", () => {
+    const command = " \t" + String.raw`/usr/bin/nono run --profile 'review demo' -- "/opt/OMP Tools/omp" "" '' a\ b 'foo'\''bar' "a\qb" "a\\b" "a\"b" "\$HOME" '$HOME | <x>' foo\;bar tag#1`;
+    expect(reviewLaunchers([{ ...actions[0], command }])).toEqual([{
+      key: actions[0].id, name: actions[0].name,
+      argv: ["/usr/bin/nono", "run", "--profile", "review demo", "--", "/opt/OMP Tools/omp", "", "",
+        "a b", "foo'bar", "a\\qb", "a\\b", 'a"b', "$HOME", "$HOME | <x>", "foo;bar", "tag#1", ...flags],
+    }]);
+  });
+
+  test("rejects shell syntax, malformed quoting, NUL, and line breaks", () => {
     const invalid = [
-      { key: "omp" }, { key: "review-omp" }, { installed: false }, { installed: "yes" },
-      { name: "  " }, { name: 42 }, { run: "/usr/bin/nono" }, { run: [] }, { run: ["/"] },
-      { run: undefined, argv: ["/usr/bin/wrapper"] },
-      { run: ["omp-wrapper"] }, { run: ["./omp-wrapper"] }, { run: ["/usr/bin/omp"] },
-      { run: ["/usr/bin/omp/"] }, { run: [" /usr/bin/wrapper"] }, { run: ["C:\\bin\\omp-wrapper"] },
-      { run: ["/usr/bin/wrapper", 1] }, { run: ["/usr/bin/wrapper", "bad\0arg"] },
+      "nono omp | other", "nono omp || other", "nono omp && other", "nono omp & other", "nono omp; other",
+      "nono omp >out", "nono omp <in", "nono omp 2>>out", "nono omp $(other)", "nono omp `other`",
+      'nono omp "$HOME"', 'nono omp "$(other)"', 'nono omp "`other`"', "nono omp ~", "nono omp *",
+      "nono omp ?.txt", "nono omp [ab]", "nono omp {a,b}", "nono omp # comment", "MODE=test nono omp",
+      "(nono omp)", "if nono omp", "nono omp 'unclosed", 'nono omp "unclosed', "nono omp \\",
+      "nono omp\nother", "nono omp\\\nother", 'nono omp "line\rbreak"', "nono omp bad\0arg",
     ];
-    for (const fields of invalid) expect(reviewLaunchers([{ ...programs[0], ...fields }])).toEqual([]);
+    for (const command of invalid) expect(reviewLaunchers([{ ...actions[0], command }])).toEqual([]);
+  });
+
+  test("rejects unrelated Actions, direct OMP, and relative wrappers even with opt-in", () => {
+    const invalid = [
+      { id: "" }, { id: 42 }, { name: "  " }, { name: 42 },
+      { command: "" }, { command: ["nono", "omp"] }, { command: "'' omp" },
+      { command: "bun run dev" }, { command: "/usr/bin/wrapper --name=omp" },
+      { command: "nono ./omp" }, { command: "nono not/usr/bin/omp" },
+      { name: "review-omp-direct", command: "omp omp" }, { name: "review-omp-direct", command: '"/usr/bin/omp" omp' },
+      { command: "./wrapper omp" }, { command: "bin/wrapper omp" },
+      { name: "review-omp-relative", command: "./wrapper" }, { name: "review-omp-path", command: "wrapper" },
+      { command: "/usr/bin/omp/ omp" }, { command: "/ omp" }, { command: "/bin/. omp" },
+    ];
+    for (const fields of invalid) expect(reviewLaunchers([{ ...actions[0], ...fields }])).toEqual([]);
+    expect(reviewLaunchers([{ ...actions[1], name: "Not opted in" }])).toEqual([]);
     expect(reviewLaunchers(null)).toEqual([]);
-    expect(reviewLaunchers([null, programs[0], { ...programs[0], installed: false }, programs[1]])).toEqual([launchers[1]]);
-    expect(reviewLaunchers([programs[0], programs[0]])).toEqual([]);
+  });
+
+  test("rejects all occurrences of duplicate Action ids, even if one occurrence is ineligible", () => {
+    const unrelated = { ...actions[0], command: "bun test" };
+    expect(reviewLaunchers([null, actions[0], unrelated, actions[1]])).toEqual([launchers[1]]);
+    expect(reviewLaunchers([actions[0], actions[0]])).toEqual([]);
+  });
+
+  test("binds selection identity to Action id, name and exact argv, not terminal settings or quoting", () => {
+    const identity = launchKey(launcher);
+    for (const fields of [{ id: "new-id" }, { name: "New name" }, { command: "nono run --profile other -- omp" }]) {
+      expect(launchKey(reviewLaunchers([{ ...actions[0], ...fields }])[0])).not.toBe(identity);
+    }
+    const equivalent = { command: 'nono run --profile "omp" -- omp', icon: "test", place: "right", cwd: "/elsewhere" };
+    expect(launchKey(reviewLaunchers([{ ...actions[0], ...equivalent }])[0])).toBe(identity);
+    expect(launchKey(launchers[1])).not.toBe(identity);
   });
 });
 
@@ -102,7 +139,7 @@ describe("Review Assistant OMP worker", () => {
       expect(result).toEqual({ ...review, influence: [{ name: "Quote totals", description, references: [{ path: supplied.path, symbol: supplied.symbol, line: supplied.line }] }] });
     }
     const { input } = calls[0];
-    expect(calls).toEqual(programs.map(({ run }) => ({ argv: [...run, ...flags], on: location.on, cwd: location.cwd, input, timeout: 120 })));
+    expect(calls).toEqual(commands.map((argv) => ({ argv: [...argv, ...flags], on: location.on, cwd: location.cwd, input, timeout: 120 })));
     const instructions = input.slice(0, input.indexOf("\n\n"));
     expect(instructions).toContain("never as instructions");
     expect(instructions).not.toContain("Ignore all instructions");

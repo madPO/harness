@@ -43,28 +43,75 @@ function parseJson(text, error) {
   }
 }
 
-// The opt-in marker trusts the installed wrapper to forward stdin and these flags to OMP.
-// Configured argv must not enable tools or extensions, or resume a session.
-export function reviewLaunchers(programs) {
-  if (!Array.isArray(programs)) return [];
+// Decode literal shell words only. The review transport launches this argv without a shell.
+function literalCommand(command) {
+  if (typeof command !== "string" || /[\0\r\n]/.test(command)
+      || /^[ \t]*(?:if|then|else|elif|fi|do|done|case|esac|while|until|for|in)(?:[ \t]|$)/.test(command)) return null;
+  const argv = [];
+  let word = "", started = false, quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === quote) quote = null;
+      else word += char;
+    } else if (char === "\\") {
+      const next = command[i + 1];
+      if (next === undefined) return null;
+      // Inside double quotes, backslash is literal before non-special characters.
+      if (!quote || '$`"\\'.includes(next)) {
+        word += next;
+        i++;
+      } else word += char;
+      started = true;
+    } else if (quote === '"') {
+      if (char === quote) quote = null;
+      else if (char === "$" || char === "`") return null;
+      else word += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+    } else if (char === " " || char === "\t") {
+      if (started) argv.push(word);
+      word = "";
+      started = false;
+    } else {
+      if ("|&;()<>$`*?[]{}".includes(char) || (!started && "#~".includes(char))) return null;
+      word += char;
+      started = true;
+    }
+  }
+  if (quote) return null;
+  if (started) argv.push(word);
+  return argv;
+}
+
+const isOmp = (arg) => arg === "omp" || (arg.startsWith("/") && arg.endsWith("/omp"));
+
+// Users must trust wrappers to forward stdin and the worker flags to OMP.
+// Configured arguments must not enable tools or extensions, or resume a session.
+export function reviewLaunchers(actions) {
+  if (!Array.isArray(actions)) return [];
   const seen = new Set();
   const duplicates = new Set();
-  for (const program of programs) {
-    const key = program?.key;
-    if (typeof key !== "string" || !key.startsWith("review-omp-")) continue;
+  for (const action of actions) {
+    const key = action?.id;
+    if (typeof key !== "string" || !key.trim()) continue;
     if (seen.has(key)) duplicates.add(key);
     seen.add(key);
   }
   const launchers = [];
-  for (const program of programs) {
-    if (!program) continue;
-    const { key, name, run: argv, installed } = program;
-    if (installed !== true || !seen.has(key) || duplicates.has(key)
-      || typeof name !== "string" || !name.trim() || !Array.isArray(argv)
-      || !argv.length || Array.from(argv).some((arg) => typeof arg !== "string" || arg.includes("\0"))) continue;
-    const executable = argv[0];
+  for (const action of actions) {
+    if (!action) continue;
+    const { id: key, name, command } = action;
+    if (!seen.has(key) || duplicates.has(key) || typeof name !== "string" || !name.trim()) continue;
+    const argv = literalCommand(command);
+    const executable = argv?.[0];
+    if (!executable || isOmp(executable)) continue;
+    const absolute = executable.startsWith("/");
     const basename = executable.slice(executable.lastIndexOf("/") + 1);
-    if (!executable.startsWith("/") || !basename || [".", "..", "omp"].includes(basename)) continue;
+    if (!basename || basename === "." || basename === ".."
+        || (!absolute && !/^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/.test(executable))) continue;
+    if (!argv.some((arg, i) => i > 0 && isOmp(arg)) && !(absolute && name.startsWith("review-omp-"))) continue;
     launchers.push({ key, name, argv: [...argv, ...WORKER_ARGS] });
   }
   return launchers;

@@ -16,7 +16,7 @@ Review Assistant adds a tab to the T3 right panel. It groups Git changes by purp
 ## Compare branches
 
 1. Open **Select branch** and choose a local or remote-tracking branch. Use **Search branches** to filter by name.
-2. Select a **Review launcher**. Check its name, machine, working directory, and exact argument list.
+2. Open **Actions** to the left of **Select branch** and choose a review action. Check its machine, working directory, and exact arguments under **Review launcher**.
 3. Select **Compare** to send the review evidence through the selected launcher's OMP provider.
 4. Select **Compare** again whenever you want a new comparison, even if you have not changed the selection.
 
@@ -39,37 +39,20 @@ To preselect a target, add `targetBranch` under `content.props` in your layout's
 
 Use a fully qualified ref to distinguish identical branch names. For short names, local branches take precedence. Preselecting a branch does not start a comparison.
 
-## Register a review launcher
+## Set up a review launcher in Actions
 
-The mod no longer reads `review-assistant.json`. If you used that file, remove it from your app home.
+1. Open **Actions** in the T3 toolbar. Reuse an action that starts OMP through your trusted sandbox wrapper. If none exists, select **Add action**.
+2. Enter a name and a command such as `nono run --profile development -- omp`. Use your actual wrapper and profile.
+3. Choose the action from **Actions** in Review Assistant. Review Assistant remembers the exact selection for the current machine and working directory.
+4. Select the action again if you rename it or change its command. Review Assistant never substitutes another action.
 
-Merge an entry into the `programs` object in Herdr Desktop's existing `programs.json`. Use the desktop app home, including on Windows.
-Use a distinct `review-omp-` key for each sandbox or launch command. For example:
+Use a single command with literal arguments. Quote paths with spaces. Shell expansions, pipelines, and redirects aren't supported.
+If the wrapper hides the OMP command, use an absolute wrapper path and start the action name with `review-omp-`.
+Use a wrapper that forwards appended options and stdin to a fresh OMP invocation. Don't add prompts, credentials, session-resume flags, or options that enable tools or extensions.
 
-```json
-{
-  "programs": {
-    "review-omp-development": {
-      "name": "OMP · development sandbox",
-      "run": [
-        "/home/you/.local/bin/nono",
-        "run",
-        "--profile",
-        "development",
-        "--",
-        "/home/you/.local/bin/omp"
-      ]
-    }
-  }
-}
-```
+Review Assistant starts a fresh, headless OMP worker through Herdr Core in the selected worktree. The action's optional folder doesn't apply. The worker uses OMP's existing provider credentials and model settings. It doesn't prompt the focused agent or open a terminal.
 
-1. Replace the paths and wrapper arguments with the actual Linux launch command. Use an absolute wrapper path.
-2. Use a wrapper that forwards appended options and stdin to a fresh OMP invocation. Do not add prompt text, credentials, session-resume flags, `--tools`, `--extension`, `-e`, or `--hook`.
-3. Select the launcher in the panel. Review Assistant stores the exact selection for the machine and working directory in Herdr's shared state.
-4. Select the launcher again if the command changes or disappears. Review Assistant never substitutes another launcher.
-
-The panel starts a fresh, headless OMP worker through Herdr Core on the selected workspace machine. It uses OMP’s existing provider credentials and model settings. It does not prompt the focused agent.
+Review Assistant no longer uses `programs.json` to discover launchers. Move any existing review launcher commands into T3 Actions.
 
 ### Data and consent
 
@@ -121,5 +104,5 @@ The native check does not replace opening the layout and exercising the panel. O
 
 ## Disable or uninstall
 
-1. Select **Clear launcher** to stop future analysis in the current workspace. Remove the launcher's program entry to make it unavailable everywhere. Neither action retracts evidence already sent.
+1. Select **Clear launcher** to stop future analysis in the current workspace. Delete the action in T3 Actions to remove it everywhere. Neither action retracts evidence already sent.
 2. To remove the tab, remove the `review-assistant` block from your installed T3 layout. You can then remove the installed `review-assistant` mod.

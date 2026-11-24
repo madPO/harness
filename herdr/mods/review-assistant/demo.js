@@ -1,10 +1,9 @@
 import { reviewLaunchers } from "./provider.js";
 
 const [launcher] = reviewLaunchers([{
-  key: "review-omp-demo",
+  id: "demo-review",
   name: "Sandboxed OMP",
-  argv: ["/usr/local/bin/example-review-wrapper", "--profile", "review demo"],
-  installed: true,
+  command: '/usr/bin/nono run --profile "review demo" -- omp',
 }]);
 
 const result = {
@@ -73,7 +72,7 @@ export function demoReview() {
     launcherOptions: [],
     selectedLauncher: launcher,
     launcherLocation: { on: "demo-linux", cwd: "/home/demo/example-project" },
-    launcherMessage: "This is an example launcher. The demo doesn't run reviews.",
+    launcherMessage: "This is an example action. The demo doesn't run reviews.",
     result,
     expanded: new Set([result.groups[0].id]),
     detail: null,

@@ -6,6 +6,11 @@ import { launchKey } from "./provider.js";
 const UI = { heading: 13, text: 12, label: 11, radius: 5, control: 24, inset: 12, detail: 168 };
 const PICKER = { button: "review-target-branch", select: "review-branch-select", popup: "review-branch-popup",
   list: "review-branch-list", search: "review-branch-search", control: 28, row: 28, shown: 8, width: 180 };
+const ACTIONS = { button: "review-actions", select: "review-actions-select", popup: "review-actions-popup",
+  list: "review-actions-list", width: 240, context: "ReviewActionsMenu" };
+const ACTIONS_TAB = "review_actions_tab", ACTIONS_BACK_TAB = "review_actions_back_tab";
+const NO_ACTIONS = "No review actions are available. Add an OMP wrapper in Actions on the T3 toolbar.";
+const EMPTY_ACTIONS = [];
 const SEARCH_LABEL = "Search branches";
 const SEARCH_CONTEXT = "ReviewBranchSearch";
 const SEARCH_TAB = "review_branch_search_tab", SEARCH_BACK_TAB = "review_branch_search_back_tab";
@@ -20,11 +25,14 @@ const resultFor = (model) => model.status === "ready" || model.status === "stale
 const groupKey = (group) => `group:${group.id}`;
 const fileKey = (group, path) => `file:${JSON.stringify([group.id, path])}`;
 const refKey = (index, ref) => `ref:${JSON.stringify([index, ref.path, ref.symbol, ref.line])}`;
-const launcherOptionKey = (launcher) => `launcher-option:${launcher.key}`;
 const showPath = (path) => path.replace(/[\x00-\x1f\x7f]/g, (c) => c === "\n" ? "\\n" : c === "\t" ? "\\t" : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 const launchString = (value) => JSON.stringify(value).replace(/[\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
   (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 const launcherLabel = ({ name, key }) => `${showPath(name)} (${launchString(key)})`;
+const availableActions = (model) => model.launcherOptions?.length ? model.launcherOptions : EMPTY_ACTIONS;
+const comparingReview = (model) => model.launcherComparing || model.status === "loading";
+const canPickAction = (view, model) => !comparingReview(model) && typeof view.selectLauncher === "function";
+const actionIndex = (options, selected) => selected ? options.findIndex((option) => option.key === selected.key) : -1;
 const canOpenFiles = (view, model) => model.canNavigate && typeof view.openFile === "function";
 const canOpenRefs = (view, model) => model.canNavigate && typeof view.openReference === "function";
 
@@ -38,7 +46,7 @@ const matchingBranches = (options, query) => query
   ? options.filter((option) => option.label.toLowerCase().includes(query))
   : options;
 
-function revealBranch(picker, count, index) {
+function revealPickerRow(picker, count, index) {
   const height = pickerSize(count);
   picker.top = clamp(Math.max(Math.min(picker.top, index * PICKER.row), (index + 1) * PICKER.row - height),
     count * PICKER.row - height);
@@ -50,7 +58,7 @@ function updateBranchMatches(search, options, query, highlight) {
   const index = highlight === null ? -1 : search.matches.findIndex((option) => option.ref === highlight);
   search.highlight = index < 0 ? null : highlight;
   if (index < 0) search.top = 0;
-  else revealBranch(search, search.matches.length, index);
+  else revealPickerRow(search, search.matches.length, index);
 }
 
 function closeBranchSearch(picker) {
@@ -67,6 +75,7 @@ export function syncReviewView(view, model, cx) {
     handles: new Map(), focused: null, watch: null, detail: null, editor: null,
     launcher: null,
     picker: { search: null },
+    actions: { menu: null, overTrigger: false },
   };
   const keys = new Set();
   const { picker } = state, options = model.branchOptions;
@@ -83,7 +92,22 @@ export function syncReviewView(view, model, cx) {
     picker.overTrigger = false;
   }
   picker.options = options;
-  for (const option of model.launcherOptions ?? []) keys.add(launcherOptionKey(option));
+  const actions = state.actions, launchers = availableActions(model);
+  const actionEnabled = canPickAction(view, model);
+  if (actionEnabled) {
+    keys.add("actions");
+    keys.add("actions-menu");
+  }
+  if (!actionEnabled || actions.location !== model.launcherLocation) {
+    actions.menu = null;
+    actions.overTrigger = false;
+  } else if (actions.options !== launchers && actions.menu) {
+    actions.menu.at = actionIndex(launchers, model.selectedLauncher);
+    actions.menu.top = 0;
+    if (actions.menu.at >= 0) revealPickerRow(actions.menu, launchers.length, actions.menu.at);
+  }
+  actions.location = model.launcherLocation;
+  actions.options = launchers;
   if (model.launcherApproved && typeof view.clearLauncher === "function") keys.add("clear-launcher");
   const result = resultFor(model);
   if (result) {
@@ -151,6 +175,7 @@ export function closeReviewView(view) {
   const state = view.reviewView;
   if (!state) return;
   closeBranchSearch(state.picker);
+  state.actions.menu = null;
   state.watch?.cancel();
   for (const handle of state.handles.values()) handle.release();
   state.editor?.release();
@@ -316,7 +341,7 @@ function branchList(view, t, model, picker, { keys, focus, active, zoom }) {
       const at = highlight === null ? -1 : matches.findIndex((option) => option.ref === highlight);
       const next = event.key === "down" ? (at + 1) % count : (at <= 0 ? count : at) - 1;
       search.highlight = matches[next].ref;
-      revealBranch(search, count, next);
+      revealPickerRow(search, count, next);
       cx.notify();
     })
     .child(div().id(PICKER.search).flex_none().child(Input.new(search.input).h(PICKER.control).px(6)
@@ -367,6 +392,7 @@ function branchPicker(view, t, model) {
     if (open) {
       const live = view.model();
       if (live.branchOptions !== options || picker.options !== options) return;
+      state.actions.menu = null;
       openBranchSearch(view, state, live.targetBranch, focus, keys, native, cx);
     } else {
       closeBranchSearch(picker);
@@ -395,9 +421,176 @@ function branchPicker(view, t, model) {
       .when(Boolean(search), (el) => el.content(branchList(view, t, model, picker, { keys, focus, active, zoom }))));
 }
 
+function actionList(view, t, model, actions, { keys, focus, active, dismiss }) {
+  const { menu, options } = actions;
+  const { launcherLocation } = model;
+  const count = options.length, height = pickerSize(count), max = count * PICKER.row - height;
+  const zoom = Number(settings()?.zoom) || 1;
+  const first = Math.floor(menu.top / PICKER.row);
+  const end = Math.min(count, Math.ceil((menu.top + height) / PICKER.row));
+  const selectedKey = model.selectedLauncher ? launchKey(model.selectedLauncher) : null;
+  const visible = (i) => i * PICKER.row < menu.top + height && (i + 1) * PICKER.row > menu.top;
+  const currentRows = () => active() && options === actions.options && launcherLocation === actions.location;
+  const choose = (identity, cx) => {
+    if (!currentRows() || !canPickAction(view, view.model())) return;
+    dismiss(cx, true);
+    // The controller rechecks the exact identity and rendered workspace before changing approval.
+    view.selectLauncher(identity, cx, launcherLocation);
+  };
+  const tabOut = (backward, cx) => {
+    if (!active()) return;
+    focus.focus();
+    if (backward) window.focus_prev();
+    else window.focus_next();
+    dismiss(cx, false);
+  };
+  // Render only visible rows and reveal the highlighted row during keyboard navigation.
+  const rows = [];
+  for (let i = first; i < end; i++) {
+    const option = options[i], identity = launchKey(option), name = showPath(option.name);
+    const selected = identity === selectedKey;
+    rows.push(h_flex().id(`review-action-option-${option.key}`).h(PICKER.row).absolute()
+      .left(0).right(0).top(i * PICKER.row - menu.top)
+      .min_w(0).px(6).gap(6).rounded(UI.radius).items_center().cursor_pointer()
+      .when(selected, (el) => el.bg(t.selected))
+      .when(i === menu.at, (el) => el.bg(t.hover).aria_active_descendant())
+      .role("list_box_option").aria_selected(selected).accessibility_label(name)
+      .on_hover((on, cx) => {
+        if (!on || !currentRows() || !visible(i) || menu.at === i) return;
+        menu.at = i;
+        cx.notify();
+      })
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        if (visible(i)) choose(identity, cx);
+      })
+      .child(div().flex_1().min_w(0).truncate().child(name))
+      .when(selected, (el) => el.child(div().flex_none().child("✓"))));
+  }
+
+  return v_flex().id(ACTIONS.list).w(ACTIONS.width).mt(4).p(4).rounded(UI.radius)
+    .bg(t.popover).border_1().border_color(t.border).shadow_lg().track_focus(keys).key_context(ACTIONS.context)
+    .on_action(ACTIONS_TAB, (_e, cx) => tabOut(false, cx))
+    .on_action(ACTIONS_BACK_TAB, (_e, cx) => tabOut(true, cx))
+    .on_mouse_down_out((_e, cx) => {
+      if (!actions.overTrigger) dismiss(cx, false);
+    })
+    .on_key_down((e, cx) => {
+      if (!active()) return;
+      if (e.key === "escape") {
+        cx.stop_propagation();
+        dismiss(cx, true);
+        return;
+      }
+      const mods = e.modifiers;
+      if (mods?.control || mods?.platform || mods?.alt) return;
+      if (e.key === "tab") {
+        cx.stop_propagation();
+        tabOut(Boolean(mods?.shift), cx);
+        return;
+      }
+      if (mods?.shift || !currentRows()) return;
+      if (e.key === "enter" || e.key === "space") {
+        cx.stop_propagation();
+        const option = options[menu.at];
+        if (option) choose(launchKey(option), cx);
+        return;
+      }
+      if (!["up", "down", "home", "end"].includes(e.key)) return;
+      cx.stop_propagation();
+      if (!count) return;
+      if (e.key === "home") menu.at = 0;
+      else if (e.key === "end") menu.at = count - 1;
+      else if (e.key === "down") menu.at = (menu.at + 1) % count;
+      else menu.at = (menu.at <= 0 ? count : menu.at) - 1;
+      revealPickerRow(menu, count, menu.at);
+      cx.notify();
+    })
+    .when(!count, (el) => el.child(secondary(t, NO_ACTIONS).px(6).py(4).role("status")))
+    .when(count > 0, (el) => el.child(div().id("review-actions-scroll").role("list_box")
+      .accessibility_label("Review actions").relative().overflow_hidden().flex_none().h(height)
+      .on_scroll_wheel((e, cx) => {
+        cx.stop_propagation();
+        if (!currentRows()) return;
+        const top = clamp(menu.top - e.delta.y / zoom, max);
+        if (top === menu.top) return;
+        menu.top = top;
+        const low = Math.ceil(top / PICKER.row), high = Math.floor((top + height) / PICKER.row) - 1;
+        menu.at = Math.max(low, Math.min(menu.at, high));
+        cx.notify();
+      })
+      .children(rows)));
+}
+
+function actionsPicker(view, t, model) {
+  const state = view.reviewView, focus = state?.handles.get("actions"), keys = state?.handles.get("actions-menu");
+  const enabled = canPickAction(view, model) && focus && keys;
+  const trigger = (el) => el.h(PICKER.control).px(6).gap(6).rounded(UI.radius)
+    .min_w(0).items_center().text_size(UI.label).bg(t.input).border_1().border_color(t.border)
+    .accessibility_label("Actions")
+    .child(div().text_color(t.foreground).child("Actions"))
+    .child(secondary(t, "▾").flex_none());
+  if (!enabled) return trigger(Button.new(ACTIONS.button)).flex_none().disabled(true).opacity(0.5);
+
+  const { actions } = state;
+  const options = availableActions(model), location = model.launcherLocation;
+  const synced = actions.location === location && actions.options === options;
+  const menu = synced ? actions.menu : null;
+  const attached = () => view.reviewView === state && state.handles.get("actions") === focus;
+  const active = () => synced && attached() && actions.menu === menu;
+  const dismiss = (cx, restore) => {
+    if (!active() || !menu) return;
+    actions.menu = null;
+    if (restore) focus.focus();
+    cx.notify();
+  };
+  const show = (open, backwards, cx) => {
+    if (!active() || open === Boolean(menu)) return;
+    if (!open) {
+      dismiss(cx, true);
+      return;
+    }
+    const live = view.model();
+    if (!canPickAction(view, live) || location !== live.launcherLocation || location !== actions.location
+      || options !== availableActions(live) || options !== actions.options) return;
+    closeBranchSearch(state.picker);
+    const selected = actionIndex(options, live.selectedLauncher);
+    const at = selected >= 0 ? selected : backwards ? options.length - 1 : options.length ? 0 : -1;
+    actions.menu = { at, top: 0 };
+    if (at >= 0) revealPickerRow(actions.menu, options.length, at);
+    cx.bind_keys([
+      { keystroke: "tab", action: ACTIONS_TAB, context: ACTIONS.context },
+      { keystroke: "shift-tab", action: ACTIONS_BACK_TAB, context: ACTIONS.context },
+    ]);
+    keys.focus();
+    cx.notify();
+  };
+  const button = focusRing(trigger(h_flex().id(ACTIONS.button))
+    .track_focus(focus).tab_index(0).role("button").cursor_pointer()
+    .hover((style) => style.bg(t.hover)).active((style) => style.bg(t.selected))
+    .on_hover((on) => { if (attached()) actions.overTrigger = on; })
+    .on_click((_e, cx) => {
+      cx.stop_propagation();
+      show(!menu, false, cx);
+    })
+    .on_key_down((e, cx) => {
+      if (!active() || !focus.is_focused()) return;
+      const mods = e.modifiers;
+      if (mods?.control || mods?.platform || mods?.alt || mods?.shift) return;
+      if (!["enter", "space", "down", "up"].includes(e.key)) return;
+      cx.stop_propagation();
+      show(!menu, e.key === "up", cx);
+    }), focus, t);
+  return Select.new(ACTIONS.select).flex_none().accessibility_label("Review actions")
+    .open(Boolean(menu)).track_focus(focus).content_focus_handle(keys)
+    .on_open_change((open, cx) => show(open, false, cx))
+    .child(Popup.new(ACTIONS.popup, button)
+      .when(Boolean(menu), (el) => el.content(actionList(view, t, model, actions, { keys, focus, active, dismiss }))));
+}
+
 function comparisonHeader(view, t, model) {
   return h_flex().id("review-comparison").flex_none().min_w(0).items_center().p(UI.inset)
-    .border_b(1).border_color(t.border).child(branchPicker(view, t, model));
+    .gap(6).border_b(1).border_color(t.border).child(actionsPicker(view, t, model)).child(branchPicker(view, t, model));
 }
 
 function launcherButton(view, t, key, label, bg, enabled, action) {
@@ -413,37 +606,27 @@ function launcherButton(view, t, key, label, bg, enabled, action) {
 }
 
 function reviewLauncher(view, t, model) {
-  const { launcherOptions = [], selectedLauncher, launcherLocation, launcherBusy, launcherError } = model;
-  const comparing = model.launcherComparing || model.status === "loading";
+  const { launcherOptions = [], selectedLauncher, launcherLocation, launcherError } = model;
+  const comparing = comparingReview(model);
   const identity = selectedLauncher ? launchKey(selectedLauncher) : null;
   const preview = view.reviewView?.launcher;
   const currentPreview = preview?.identity === identity ? preview : null;
-  const canSelect = !launcherBusy && !comparing && typeof view.selectLauncher === "function";
   const canClear = model.launcherApproved && typeof view.clearLauncher === "function";
-  const canCompare = Boolean(model.canCompare && currentPreview && !launcherBusy && !comparing);
+  const canCompare = Boolean(model.canCompare && currentPreview && !comparing);
   const feedback = model.launcherMessage ?? (comparing ? "Comparing branches…"
-    : launcherBusy ? "Finding review launchers…"
     : selectedLauncher ? null
-    : launcherOptions.length ? "Choose a review launcher to inspect its arguments."
-    : "No review launcher is available. Check the agent programs configured for this workspace.");
+    : launcherOptions.length ? "Choose a review action in Actions to inspect its arguments."
+    : NO_ACTIONS);
 
   return v_flex().id("review-launcher").min_w(0).gap(6).role("group").accessibility_label("Review launcher")
     .child(heading("Review launcher"))
     .when(Boolean(feedback), (el) => el.child(secondary(t, feedback)
       .when(Boolean(launcherError), (message) => message.text_color(t.ansi1))
       .role(launcherError ? "alert" : "status")))
-    .when(launcherOptions.length > 0, (el) => el.child(v_flex().min_w(0).gap(4)
-      .role("group").accessibility_label("Available review launchers")
-      .children(launcherOptions.map((option) => {
-        const key = launchKey(option), selected = key === identity;
-        const label = `${launcherLabel(option)}${selected ? " — selected" : ""}`;
-        return launcherButton(view, t, launcherOptionKey(option), label, selected ? t.selected : t.input, canSelect,
-          (cx) => view.selectLauncher(key, cx, launcherLocation)).w_full().border_1().border_color(t.border);
-      }))))
     .child(v_flex().min_w(0).p(8).gap(4).rounded(UI.radius).border_1().border_color(t.border).bg(t.raised)
       .child(div().min_w(0).font_medium()
-        .child(selectedLauncher ? `Selected agent: ${launcherLabel(selectedLauncher)}`
-          : "No review launcher selected"))
+        .child(selectedLauncher ? `Selected action: ${launcherLabel(selectedLauncher)}`
+          : "No review action selected"))
       .when(Boolean(launcherLocation?.cwd), (el) => el
         .child(secondary(t, `Workspace machine: ${launcherLocation.on ? showPath(launcherLocation.on) : "Herdr Core (local)"}`))
         .child(secondary(t, `Working directory: ${showPath(launcherLocation.cwd)}`)))
@@ -453,9 +636,10 @@ function reviewLauncher(view, t, model) {
           .role("group").accessibility_label(`Exact launch arguments: ${currentPreview.argv}`)
           .child(Editor.new(currentPreview.editor).size_full())))
       .when(Boolean(canClear), (el) => el.child(h_flex().min_w(0)
-        .child(launcherButton(view, t, "clear-launcher", "Clear launcher", t.background, !comparing,
+        .child(launcherButton(view, t, "clear-launcher", "Clear approval", t.background, !comparing,
           (cx) => view.clearLauncher(cx, launcherLocation))))))
-    .child(div().min_w(0).child("Selecting Compare sends bounded Git evidence through the selected OMP provider."))
+    .child(div().min_w(0).child("Choose only actions with wrappers you trust to forward the OMP safety flags."))
+    .child(div().min_w(0).child("Compare sends bounded Git evidence through the selected action."))
     .child(h_flex().min_w(0).child(launcherButton(view, t, "compare", "Compare", t.raised, canCompare,
       (cx) => view.compare(cx, identity, model.targetBranch, launcherLocation))));
 }
