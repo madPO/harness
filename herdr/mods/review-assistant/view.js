@@ -1,10 +1,13 @@
 import { div } from "gpui-kit";
-import { Button, Editor, EditorState, Popup, Select, h_flex, v_flex } from "gpui-base";
+import { Button, Editor, EditorState, Input, InputState, Popup, Select, h_flex, v_flex } from "gpui-base";
 import { settings, theme } from "herdr";
 
 const UI = { heading: 13, text: 12, label: 11, radius: 5, control: 24, inset: 12, detail: 168 };
-const PICKER = { button: "review-target-branch", select: "review-branch-select", popup: "review-branch-popup", list: "review-branch-list",
-  control: 28, row: 28, shown: 8, width: 180 };
+const PICKER = { button: "review-target-branch", select: "review-branch-select", popup: "review-branch-popup",
+  list: "review-branch-list", search: "review-branch-search", control: 28, row: 28, shown: 8, width: 180 };
+const SEARCH_LABEL = "Search branches";
+const SEARCH_CONTEXT = "ReviewBranchSearch";
+const SEARCH_TAB = "review_branch_search_tab", SEARCH_BACK_TAB = "review_branch_search_back_tab";
 const importance = { high: "High", medium: "Medium", low: "Low" };
 const messages = {
   loading: "Analyzing changes…",
@@ -25,26 +28,10 @@ const branchName = (branch) => `${branch.label} (${branchKind(branch).toLowerCas
 const pickerSize = (count) => Math.min(count, PICKER.shown) * PICKER.row;
 const clamp = (value, max) => Math.max(0, Math.min(value, max));
 
-function branchJump(picker, event, options, at) {
-  const count = options.length;
-  if (event.key === "down") return (at + 1) % count;
-  if (event.key === "up") return (at <= 0 ? count : at) - 1;
-  if (event.key === "home") return 0;
-  if (event.key === "end") return count - 1;
-  if (!event.key_char?.trim() || event.modifiers?.control || event.modifiers?.platform || event.modifiers?.alt) return -1;
-
-  const now = Date.now(), letter = event.key_char.toLowerCase();
-  picker.typed = now - (picker.typedAt ?? -Infinity) < 750 ? picker.typed + letter : letter;
-  picker.typedAt = now;
-  const repeated = [...picker.typed].every((letter) => letter === picker.typed[0]);
-  const prefix = repeated ? picker.typed[0] : picker.typed;
-  const start = Math.max(at + (repeated ? 1 : 0), 0);
-  for (let i = 0; i < count; i++) {
-    const index = (start + i) % count;
-    if (options[index].label.toLowerCase().startsWith(prefix)) return index;
-  }
-  return -1;
-}
+const searchQuery = (value) => value.trim().toLowerCase();
+const matchingBranches = (options, query) => query
+  ? options.filter((option) => option.label.toLowerCase().includes(query))
+  : options;
 
 function revealBranch(picker, count, index) {
   const height = pickerSize(count);
@@ -52,24 +39,28 @@ function revealBranch(picker, count, index) {
     count * PICKER.row - height);
 }
 
-function showBranchList(picker, open, options, selected) {
-  if (picker.open === open) return;
-  picker.open = open;
-  picker.highlight = open ? selected : null;
-  picker.top = 0;
-  picker.typed = "";
-  picker.typedAt = undefined;
-  if (open && selected) {
-    const index = options.findIndex((option) => option.ref === selected);
-    if (index >= 0) revealBranch(picker, options.length, index);
-  }
+function updateBranchMatches(search, options, query, highlight) {
+  search.query = query;
+  search.matches = matchingBranches(options, query);
+  const index = highlight === null ? -1 : search.matches.findIndex((option) => option.ref === highlight);
+  search.highlight = index < 0 ? null : highlight;
+  if (index < 0) search.top = 0;
+  else revealBranch(search, search.matches.length, index);
+}
+
+function closeBranchSearch(picker) {
+  const { search } = picker;
+  if (!search) return;
+  picker.search = null;
+  search.focusWork?.cancel();
+  search.input.release();
 }
 
 // Native focus handles and editor state belong to the view lifecycle, not to render.
 export function syncReviewView(view, model, cx) {
   const state = view.reviewView ??= {
     handles: new Map(), focused: null, watch: null, detail: null, editor: null,
-    picker: { open: false, highlight: null, top: 0 },
+    picker: { search: null },
   };
   const keys = new Set();
   const { picker } = state, options = model.branchOptions;
@@ -77,13 +68,12 @@ export function syncReviewView(view, model, cx) {
     keys.add("target-branch");
     keys.add("branch-menu");
     keys.add("compare");
-    if (options !== picker.options && picker.highlight) {
-      const index = options.findIndex((option) => option.ref === picker.highlight);
-      if (index >= 0) revealBranch(picker, options.length, index);
-      else picker.highlight = null;
+    if (options !== picker.options && picker.search) {
+      const { search } = picker;
+      updateBranchMatches(search, options, search.query, search.highlight);
     }
   } else {
-    showBranchList(picker, false);
+    closeBranchSearch(picker);
     picker.overTrigger = false;
   }
   picker.options = options;
@@ -138,6 +128,7 @@ export function syncReviewView(view, model, cx) {
 export function closeReviewView(view) {
   const state = view.reviewView;
   if (!state) return;
+  closeBranchSearch(state.picker);
   state.watch?.cancel();
   for (const handle of state.handles.values()) handle.release();
   state.editor?.release();
@@ -171,67 +162,159 @@ function pathRow(view, t, key, label, action) {
     : div().min_w(0).px(6).py(3).text_size(UI.label)).child(label);
 }
 
-function branchList(t, model, picker, { keys, focus, show, choose, zoom }) {
-  const options = model.branchOptions, count = options.length, height = pickerSize(count);
-  const max = count * PICKER.row - height, top = clamp(picker.top, max);
+function refreshBranchQuery(picker, search) {
+  const query = searchQuery(search.input.value());
+  if (query === search.query) return false;
+  updateBranchMatches(search, picker.options, query, null);
+  return true;
+}
+
+function selectBranchMatch(view, picker, option, focus, cx) {
+  if (!option) return;
+  closeBranchSearch(picker);
+  focus.focus();
+  view.selectBranch(option.ref, cx);
+  cx.notify();
+}
+
+function openBranchSearch(view, state, selected, focus, keys, native, cx) {
+  const { picker } = state;
+  const input = InputState.new({ placeholder: SEARCH_LABEL });
+  const search = { input, top: 0, focused: false };
+  updateBranchMatches(search, picker.options, "", selected ?? null);
+  picker.search = search;
+  const active = () => view.reviewView === state && picker.search === search;
+  const current = () => active() && picker.options === view.model().branchOptions;
+  input.on("change", (_e, cx) => {
+    if (current() && refreshBranchQuery(picker, search)) cx.notify();
+  });
+  input.on("submit", (_e, cx) => {
+    if (!current()) return;
+    const changed = refreshBranchQuery(picker, search);
+    const { matches, highlight } = search;
+    const option = (highlight && matches.find((option) => option.ref === highlight)) || matches[0];
+    if (option) selectBranchMatch(view, picker, option, focus, cx);
+    else if (changed) cx.notify();
+  });
+  const setFocused = (focused) => (_e, cx) => {
+    if (!active() || search.focused === focused) return;
+    search.focused = focused;
+    cx.notify();
+  };
+  input.on("focus", setFocused(true));
+  input.on("blur", setFocused(false));
+  // Root Tab bindings run before raw key handlers. Override them only inside this popup.
+  cx.bind_keys([
+    { keystroke: "tab", action: SEARCH_TAB, context: SEARCH_CONTEXT },
+    { keystroke: "shift-tab", action: SEARCH_BACK_TAB, context: SEARCH_CONTEXT },
+  ]);
+  // Native Select transfers focus after on_open_change returns.
+  if (native) search.focusWork = cx.timer.after(0, () => {
+    search.focusWork = null;
+    if (current() && (keys.is_focused() || focus.is_focused())) input.focus();
+  });
+  else input.focus();
+}
+
+function branchList(view, t, model, picker, { keys, focus, active, zoom }) {
+  const { search } = picker;
+  const options = search.matches, count = options.length, height = pickerSize(count);
+  const max = count * PICKER.row - height, top = clamp(search.top, max);
   const first = Math.floor(top / PICKER.row), end = Math.min(count, Math.ceil((top + height) / PICKER.row));
+  const currentInventory = () => model.branchOptions === picker.options && picker.options === view.model().branchOptions;
+  const currentRows = () => active() && currentInventory() && options === search.matches;
+  const visible = (i) => i * PICKER.row < search.top + height && (i + 1) * PICKER.row > search.top;
+  const dismiss = (cx, restore) => {
+    if (!active()) return;
+    closeBranchSearch(picker);
+    if (restore) focus.focus();
+    cx.notify();
+  };
+  const tabOut = (backward, cx) => {
+    if (!active()) return;
+    // The popup paints out of order. Traverse from its trigger, not the deferred input.
+    focus.focus();
+    if (backward) window.focus_prev();
+    else window.focus_next();
+    dismiss(cx, false);
+  };
   const rows = [];
   for (let i = first; i < end; i++) {
-    const option = options[i], selected = option.ref === model.targetBranch, highlighted = option.ref === picker.highlight;
+    const option = options[i], selected = option.ref === model.targetBranch, highlighted = option.ref === search.highlight;
     rows.push(h_flex().id(`review-branch-option-${option.ref}`).h(PICKER.row).absolute().left(0).right(0).top(i * PICKER.row - top)
       .min_w(0).px(6).gap(6).rounded(UI.radius).items_center().cursor_pointer()
       .when(selected, (el) => el.bg(t.selected))
       .when(highlighted, (el) => el.bg(t.hover).aria_active_descendant())
       .on_hover((on, cx) => {
-        if (!on || picker.highlight === option.ref) return;
-        picker.highlight = option.ref;
+        if (!on || !currentRows() || !visible(i) || search.highlight === option.ref) return;
+        search.highlight = option.ref;
         cx.notify();
       })
       .role("list_box_option").aria_selected(selected).accessibility_label(branchName(option))
-      .on_click((_e, cx) => { cx.stop_propagation(); choose(option, cx); })
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        if (!currentRows() || !visible(i)) return;
+        if (refreshBranchQuery(picker, search)) { cx.notify(); return; }
+        selectBranchMatch(view, picker, option, focus, cx);
+      })
       .child(div().flex_1().min_w(0).truncate().child(option.label))
       .child(secondary(t, branchKind(option)).flex_none())
       .when(selected, (el) => el.child(div().flex_none().child("✓"))));
   }
 
-  return v_flex().id(PICKER.list).w(picker.width ?? PICKER.width).mt(4).p(4).rounded(UI.radius)
-    .bg(t.popover).border_1().border_color(t.border).shadow_lg().track_focus(keys).role("list_box")
+  return v_flex().id(PICKER.list).w(picker.width ?? PICKER.width).mt(4).p(4).gap(4).rounded(UI.radius)
+    .bg(t.popover).border_1().border_color(t.border).shadow_lg().track_focus(keys).key_context(SEARCH_CONTEXT)
+    .on_action(SEARCH_TAB, (_e, cx) => tabOut(false, cx))
+    .on_action(SEARCH_BACK_TAB, (_e, cx) => tabOut(true, cx))
     .on_mouse_down_out((_e, cx) => {
-      if (!picker.overTrigger) { show(false); cx.notify(); }
+      if (!picker.overTrigger) dismiss(cx, false);
     })
     .on_key_down((event, cx) => {
-      const at = options.findIndex((option) => option.ref === picker.highlight);
-      if (event.key === "enter" || event.key === "space") {
-        if (at >= 0) choose(options[at], cx);
-      } else if (event.key === "escape" || event.key === "tab") {
-        show(false);
-        focus.focus();
-        cx.notify();
-        if (event.key === "tab") return;
-      } else {
-        const next = branchJump(picker, event, options, at);
-        if (next < 0) return;
-        picker.highlight = options[next].ref;
-        revealBranch(picker, count, next);
-        cx.notify();
+      if (!active()) return;
+      if (event.key === "escape") {
+        cx.stop_propagation();
+        dismiss(cx, true);
+        return;
       }
+      const modifiers = event.modifiers;
+      if (modifiers?.control || modifiers?.platform || modifiers?.alt) return;
+      if (event.key === "tab") {
+        cx.stop_propagation();
+        tabOut(Boolean(modifiers?.shift), cx);
+        return;
+      }
+      if (modifiers?.shift || (event.key !== "up" && event.key !== "down")) return;
       cx.stop_propagation();
+      if (!currentInventory()) return;
+      const changed = refreshBranchQuery(picker, search);
+      const { matches, highlight } = search;
+      const count = matches.length;
+      if (!count) { if (changed) cx.notify(); return; }
+      const at = highlight === null ? -1 : matches.findIndex((option) => option.ref === highlight);
+      const next = event.key === "down" ? (at + 1) % count : (at <= 0 ? count : at) - 1;
+      search.highlight = matches[next].ref;
+      revealBranch(search, count, next);
+      cx.notify();
     })
+    .child(div().id(PICKER.search).flex_none().child(Input.new(search.input).h(PICKER.control).px(6)
+      .rounded(UI.radius).bg(t.input).border(2).border_color(search.focused ? t.accent : t.border)
+      .text_size(UI.label).text_color(t.foreground).accessibility_label(SEARCH_LABEL)))
+    .when(!count, (el) => el.child(secondary(t, "No matching branches.").px(6).py(4)))
     // Draw only visible rows. Native scroll areas cannot reveal a keyboard-highlighted row.
-    .child(div().id("review-branch-scroll").relative().overflow_hidden().flex_none().h(height)
+    .when(count > 0, (el) => el.child(div().id("review-branch-scroll").role("list_box")
+      .relative().overflow_hidden().flex_none().h(height)
       .on_scroll_wheel((event, cx) => {
         cx.stop_propagation();
-        const next = clamp(picker.top - event.delta.y / zoom, max);
-        if (next === picker.top) return;
-        picker.top = next;
-        const at = options.findIndex((option) => option.ref === picker.highlight);
-        if (at >= 0) {
-          const low = Math.ceil(next / PICKER.row), high = Math.floor((next + height) / PICKER.row) - 1;
-          picker.highlight = options[Math.max(low, Math.min(at, high))].ref;
-        }
+        if (!currentRows()) return;
+        const next = clamp(search.top - event.delta.y / zoom, max);
+        if (next === search.top) return;
+        search.top = next;
+        const at = search.highlight === null ? -1 : options.findIndex((option) => option.ref === search.highlight);
+        const low = Math.ceil(next / PICKER.row), high = Math.floor((next + height) / PICKER.row) - 1;
+        search.highlight = options[Math.max(low, Math.min(at, high))].ref;
         cx.notify();
       })
-      .children(rows));
+      .children(rows)));
 }
 
 function focusRing(el, handle, t) {
@@ -253,37 +336,40 @@ function branchPicker(view, t, model) {
     .child(secondary(t, "▾").flex_none());
   if (!enabled) return trigger(Button.new(PICKER.button)).flex_1().disabled(true).opacity(0.5);
 
-  const { picker } = state, zoom = Number(settings()?.zoom) || 1;
-  const current = () => view.model().branchOptions === options;
-  const show = (open) => {
-    if (!open || current()) showBranchList(picker, open, options, model.targetBranch);
-  };
-  const choose = (option, cx) => {
-    if (!current()) return;
-    show(false);
-    focus.focus();
-    view.selectBranch(option.ref, cx);
+  const { picker } = state, { search } = picker, zoom = Number(settings()?.zoom) || 1;
+  const attached = () => view.reviewView === state && state.handles.get("target-branch") === focus;
+  const active = () => attached() && picker.search === search;
+  const show = (open, native, cx) => {
+    if (!active() || open === Boolean(search)) return;
+    if (open) {
+      const live = view.model();
+      if (live.branchOptions !== options || picker.options !== options) return;
+      openBranchSearch(view, state, live.targetBranch, focus, keys, native, cx);
+    } else {
+      closeBranchSearch(picker);
+      focus.focus();
+    }
+    cx.notify();
   };
   const button = focusRing(trigger(h_flex().id(PICKER.button))
     .w_full().track_focus(focus).tab_index(0).role("button").cursor_pointer()
     .hover((style) => style.bg(t.hover)).active((style) => style.bg(t.selected))
-    .on_hover((on) => { picker.overTrigger = on; })
+    .on_hover((on) => { if (attached()) picker.overTrigger = on; })
     .on_size_change((size, cx) => {
+      if (!attached()) return;
       const width = size.width / zoom;
       if (width === picker.width) return;
       picker.width = width;
-      if (picker.open) cx.notify();
+      if (picker.search) cx.notify();
     })
-    .on_click((_e, cx) => {
-      show(!picker.open);
-      (picker.open ? keys : focus).focus();
-      cx.notify();
-    }), focus, t);
+    .on_click((_e, cx) => show(!search, false, cx)), focus, t);
   return Select.new(PICKER.select).flex_1().min_w(0).accessibility_label("Target branch")
-    .open(picker.open).track_focus(focus).content_focus_handle(keys)
-    .on_open_change((open, cx) => { show(open); cx.notify(); })
+    .open(Boolean(search)).track_focus(focus)
+    // The menu handle receives initial native focus; later keys must leave the caret in the input.
+    .when(!search, (el) => el.content_focus_handle(keys))
+    .on_open_change((open, cx) => show(open, true, cx))
     .child(Popup.new(PICKER.popup, button).w_full()
-      .when(picker.open, (el) => el.content(branchList(t, model, picker, { keys, focus, show, choose, zoom }))));
+      .when(Boolean(search), (el) => el.content(branchList(view, t, model, picker, { keys, focus, active, zoom }))));
 }
 
 function comparisonHeader(view, t, model) {

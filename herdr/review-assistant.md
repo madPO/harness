@@ -13,7 +13,7 @@ Review Assistant adds a tab to the T3 right panel. It groups Git changes by purp
 
 ## Compare branches
 
-1. Open **Select branch** and choose a local or remote-tracking branch.
+1. Open **Select branch** and choose a local or remote-tracking branch. Use **Search branches** to filter by name.
 2. Select **Compare** to review the current local branch against the selected branch. Check out a local branch first if HEAD is detached.
 3. Select **Compare** again whenever you want a new comparison, even if you have not changed the selection.
 
