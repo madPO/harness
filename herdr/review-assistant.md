@@ -20,6 +20,8 @@ Review Assistant adds a tab to the T3 right panel. It groups Git changes by purp
 3. Select **Compare** to send the review evidence through the selected launcher's OMP provider.
 4. Select **Compare** again whenever you want a new comparison, even if you have not changed the selection.
 
+**Actions** lists every action saved in T3. Actions marked **Not a review launcher** appear in the list but can't be selected for Compare.
+
 Review Assistant compares the checked-out branch with the branches' merge base. The review includes committed additions, deletions, and detected renames. It excludes staged, unstaged, and untracked changes. Influence also skips paths with local changes.
 
 The dropdown lists refs already on the workspace machine. Review Assistant never fetches; update remote-tracking refs separately if needed.

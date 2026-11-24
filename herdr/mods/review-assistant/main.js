@@ -11,6 +11,7 @@ import { closeReviewView, renderReview, syncReviewView } from "./view.js";
 const POLL_MS = 10_000;
 const LAUNCHER_APPROVALS = "review-assistant.launcher-approvals";
 const LAUNCHER_CHANGED = "The approved action changed or disappeared. Choose an action again.";
+const EMPTY_OPTIONS = [];
 const location = () => reviewPanelActive() ? resolveContext(spaces(), panes(), focused()) : null;
 const sameLocation = (a, b) => a && b && a.space === b.space && a.cwd === b.cwd && a.on === b.on;
 const hasRef = (options, ref) => options?.some((branch) => branch.ref === ref);
@@ -18,7 +19,27 @@ const launcherPlace = ({ on, cwd }) => JSON.stringify([on, cwd]);
 const approvedLauncher = (place) => shared(LAUNCHER_APPROVALS)?.[place] ?? null;
 const findLauncher = (options, key) => key && options?.find((option) => launchKey(option) === key);
 const sameLaunchers = (a, b) => a.length === b.length && a.every((option, i) => launchKey(option) === launchKey(b[i]));
+const sameActionOptions = (a, b) => a.length === b.length && a.every(({ key, name, launcherIdentity }, i) =>
+  key === b[i].key && name === b[i].name && launcherIdentity === b[i].launcherIdentity);
 const idleReview = { status: "idle", message: null, result: null, expanded: new Set(), detail: null, canNavigate: false };
+
+function displayActions(list, launchers) {
+  if (!Array.isArray(list)) return [];
+  const identities = new Map(launchers.map((launcher) => [launcher.key, launchKey(launcher)]));
+  const occurrences = new Map();
+  const options = [];
+  for (const action of list) {
+    if (!action) continue;
+    const { id, name, command } = action;
+    if (typeof id !== "string" || !id.trim() || typeof name !== "string" || !name.trim()
+        || typeof command !== "string" || !command.trim()) continue;
+    // Keep duplicate rows visible with distinct IDs. The provider rejects duplicate launchers.
+    const occurrence = occurrences.get(id) ?? 0;
+    occurrences.set(id, occurrence + 1);
+    options.push({ key: JSON.stringify([id, occurrence]), name, launcherIdentity: identities.get(id) ?? null });
+  }
+  return options;
+}
 
 function preselect(options, name) {
   if (!name) return null;
@@ -58,7 +79,8 @@ function newSession(location, previous) {
   return {
     location, active: true, place: launcherPlace(location), target: previous?.target ?? null,
     inventory: null, error: null, reading: false, preselect: previous?.preselect ?? true, nextProbe: 0,
-    comparing: null, compared: null, launcherOptions: [], launcherApproval: null, launcherNotice: null,
+    comparing: null, compared: null, launcherOptions: EMPTY_OPTIONS, actionOptions: EMPTY_OPTIONS,
+    launcherApproval: null, launcherNotice: null,
   };
 }
 
@@ -136,7 +158,8 @@ export default class ReviewAssistant extends View {
       targetBranch: target,
       branchMessage,
       branchError: Boolean(session?.error),
-      launcherOptions: session?.launcherOptions ?? [],
+      launcherOptions: session?.launcherOptions ?? EMPTY_OPTIONS,
+      actionOptions: session?.actionOptions ?? EMPTY_OPTIONS,
       selectedLauncher: launcher,
       launcherApproved: Boolean(approval),
       launcherMessage: launcherFeedback(session, launcher),
@@ -158,7 +181,7 @@ export default class ReviewAssistant extends View {
     if (this.closed) return;
     this.syncLocation();
     const session = this.activeSession();
-    if (session?.location.cwd) this.discoverLaunchers(session);
+    if (session) this.discoverLaunchers(session);
     const now = Date.now();
     if (session?.location.cwd && now >= session.nextProbe) {
       session.nextProbe = now + POLL_MS;
@@ -204,11 +227,18 @@ export default class ReviewAssistant extends View {
   }
 
   discoverLaunchers(session) {
-    const options = reviewLaunchers(shared("t3-actions.actions")?.list);
+    const list = shared("t3-actions.actions")?.list;
+    const options = reviewLaunchers(list);
+    const actionOptions = displayActions(list, options);
+    if (!sameActionOptions(session.actionOptions, actionOptions)) {
+      session.actionOptions = actionOptions;
+      this.needsSync = true;
+    }
     if (!sameLaunchers(session.launcherOptions, options)) {
       session.launcherOptions = options;
       this.needsSync = true;
     }
+    if (!session.location.cwd) return;
     const approval = approvedLauncher(session.place);
     if (approval && !findLauncher(options, approval)) {
       saveLauncher(session, null);
