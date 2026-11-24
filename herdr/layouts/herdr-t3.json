@@ -188,7 +188,8 @@
             { "id": "files", "type": "block", "content": { "mod": "t3-files" } },
             { "id": "git", "type": "block", "content": { "mod": "git-graph" } },
             { "id": "changes", "type": "block", "content": { "mod": "t3-changes" } },
-            { "id": "branches", "type": "block", "content": { "mod": "t3-branches" } }
+            { "id": "branches", "type": "block", "content": { "mod": "t3-branches" } },
+            { "id": "review-assistant", "type": "block", "content": { "mod": "review-assistant" } }
           ]
         },
         { "id": "panel-bottom-inset", "type": "row", "size": { "px": 8 }, "children": [] }

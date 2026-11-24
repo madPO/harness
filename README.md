@@ -11,7 +11,7 @@ Personal extensions, skills, and configuration for [Oh My Pi](https://github.com
 | `omp/commands/` | User-invoked engineering reflection commands. |
 | `omp/agent/` | Specialist task agents, model/tool settings, skill routing, personality, LSP, and MCP configuration. |
 | `nono/profiles/madpo.json` | Sandbox profile for Go, JavaScript, Rust, .NET, and browser tooling. |
-| `herdr/` | Herdr T3 layout, mods, key bindings, and upstream license. |
+| `herdr/` | Herdr T3 layouts, Review Assistant, Git mods, key bindings, and upstream license. |
 
 ## Oh My Pi
 
@@ -170,13 +170,19 @@ Install from this repository's root:
 1. Back up `~/.config/herdr-app/`, including existing `layouts/`, `mods/`, and `keys.json`.
 2. Create `~/.config/herdr-app/layouts/` and `~/.config/herdr-app/mods/` if needed. Inspect destinations before copying; reconcile existing customizations rather than overwriting them blindly.
 3. Copy `herdr/layouts/herdr-t3.json` and `herdr/layouts/herdr-t3.svg` into the app's `layouts/` directory, or merge the Changes block into a customized layout. Preserve its `changes` block ID and set its content mod to `t3-changes`. Replacing a layout can discard its theme, focus ring, sidebar state, or added blocks.
-4. Copy each directory in `herdr/mods/t3-*` and `herdr/mods/git-graph` into the app's `mods/` directory. Include `t3-changes`, `t3-files`, `git-graph`, and `t3-chrome`. Copy every file in `t3-changes`, including `tree-row.js`, `file-icons.js`, and `file-icons-data.js`. Changes uses its local tree renderer and icon resolver. The installed T3 Files mod supplies icon assets; Git Graph supplies the refresh icon. Changes does not import JavaScript from sibling mods. Reconcile any existing mod customizations first. Use real copies, not symlinks: upstream says mod SVGs do not load through symlinks.
+4. Copy each directory in `herdr/mods/t3-*`, `herdr/mods/git-graph`, and `herdr/mods/review-assistant` into the app's `mods/` directory. Include `t3-changes`, `t3-files`, `git-graph`, and `t3-chrome`. Copy every file in `t3-changes`, including `tree-row.js`, `file-icons.js`, and `file-icons-data.js`. Changes uses its local tree renderer and icon resolver. The installed T3 Files mod supplies icon assets; Git Graph supplies the refresh icon. Changes does not import JavaScript from sibling mods. Reconcile any existing mod customizations first. Use real copies, not symlinks: upstream says mod SVGs do not load through symlinks.
 5. Merge `herdr/keys.json` into `~/.config/herdr-app/keys.json`. If no file exists, copy it there. Otherwise, merge each section and key, retaining unrelated sections and bindings. Choose explicitly between conflicting bindings. The file includes the original global and terminal bindings alongside T3 layout and mod bindings. Layout-scoped shortcuts may override global shortcuts.
 6. Select `herdr-t3` in Herdr's layout picker. See the [T3 guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md) for usage and key commands.
 
 For a customized layout, merge the `branches` block and update `t3-chrome` to expose its tab. Preserve the block ID and `t3-branches` content mod.
 
 The T3 bindings target macOS. On Linux and Windows, rebind keys as described in the [upstream key guide](https://github.com/JinJieBeWater/herdr-t3/blob/9a9fd18c88d3312577382944b42593c7d27e98fb/docs/user/guide.md#keys).
+
+### Review Assistant
+
+[Install and use Review Assistant](herdr/review-assistant.md) from the right panel in `herdr-t3`.
+It groups Git changes by purpose and highlights related unchanged code for human review.
+Review Assistant is separate from the optional upstream T3 Review mod.
 
 ### Git panels
 
