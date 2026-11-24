@@ -1,9 +1,9 @@
 import { reviewLaunchers } from "./provider.js";
 
-const [launcher] = reviewLaunchers([{
+const launcherOptions = reviewLaunchers([{
   id: "demo-review",
-  name: "Sandboxed OMP",
-  command: '/usr/bin/nono run --profile "review demo" -- omp',
+  name: "OMP review",
+  command: "omp",
 }]);
 
 const result = {
@@ -69,8 +69,8 @@ export function demoReview() {
   return {
     status: "ready",
     message: null,
-    launcherOptions: [],
-    selectedLauncher: launcher,
+    launcherOptions,
+    selectedLauncher: launcherOptions[0],
     launcherLocation: { on: "demo-linux", cwd: "/home/demo/example-project" },
     launcherMessage: "This is an example action. The demo doesn't run reviews.",
     result,

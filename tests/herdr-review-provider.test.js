@@ -13,6 +13,7 @@ const commands = [
   ["nono", "run", "--profile", "omp", "--", "omp"],
   ["/opt/Review Tools/omp-sandbox", "isolated workspace", ""],
 ];
+const shellCommand = 'MODE=review "$REVIEW_BIN" "$@" | cat';
 const launchers = reviewLaunchers(actions);
 const launcher = launchers[0];
 const location = { on: "linux-core", cwd: "/work/repo with spaces" };
@@ -55,7 +56,7 @@ function requestData(input) {
 const runResult = (result) => runAnalysis(transport(result).exec, launcher, location, snapshot);
 
 describe("Review Assistant launcher discovery", () => {
-  test("preserves Action order and appends the exact worker flags to PATH and opaque wrappers", () => {
+  test("preserves Action order and appends the exact worker flags to literal commands", () => {
     expect(launchers).toEqual(actions.map(({ id, name }, i) => ({ key: id, name, argv: [...commands[i], ...flags] })));
   });
 
@@ -68,38 +69,75 @@ describe("Review Assistant launcher discovery", () => {
     }]);
   });
 
-  test("rejects shell syntax, malformed quoting, NUL, and line breaks", () => {
-    const invalid = [
+  test("launches direct OMP, relative executables, and unrelated Actions without a shell", () => {
+    const literals = [
+      { command: "omp", argv: ["omp"] },
+      { command: '"/usr/bin/omp" --model "test model"', argv: ["/usr/bin/omp", "--model", "test model"] },
+      { command: './bin/review "example repo"', argv: ["./bin/review", "example repo"] },
+      { command: "bin/review", argv: ["bin/review"] },
+      { command: "bun run dev", argv: ["bun", "run", "dev"] },
+      { command: '"/path with spaces/review"', argv: ["/path with spaces/review"] },
+    ];
+    const saved = literals.map(({ command }, i) => ({ id: `action-${i}`, name: `Action ${i}`, command }));
+    expect(reviewLaunchers(saved)).toEqual(saved.map(({ id, name }, i) =>
+      ({ key: id, name, argv: [...literals[i].argv, ...flags] })));
+  });
+
+  test("preserves shell source exactly and passes worker flags as positional arguments", () => {
+    const scripts = [
+      ` \t${shellCommand}  `,
+      "MODE=test nono omp", 'REVIEW_MODE="test mode" ./review', "! review", "if nono omp",
       "nono omp | other", "nono omp || other", "nono omp && other", "nono omp & other", "nono omp; other",
       "nono omp >out", "nono omp <in", "nono omp 2>>out", "nono omp $(other)", "nono omp `other`",
       'nono omp "$HOME"', 'nono omp "$(other)"', 'nono omp "`other`"', "nono omp ~", "nono omp *",
-      "nono omp ?.txt", "nono omp [ab]", "nono omp {a,b}", "nono omp # comment", "MODE=test nono omp",
-      "(nono omp)", "if nono omp", "nono omp 'unclosed", 'nono omp "unclosed', "nono omp \\",
-      "nono omp\nother", "nono omp\\\nother", 'nono omp "line\rbreak"', "nono omp bad\0arg",
+      "nono omp ?.txt", "nono omp [ab]", "nono omp {a,b}", "nono omp # comment", "# comment only",
+      "(nono omp)", "nono omp 'unclosed", 'nono omp "unclosed', "nono omp \\", "'' omp",
+      "nono omp\nother", "nono omp\\\nother", 'nono omp "line\rbreak"',
     ];
-    for (const command of invalid) expect(reviewLaunchers([{ ...actions[0], command }])).toEqual([]);
+    for (const command of scripts) {
+      expect(reviewLaunchers([{ ...actions[0], command }])).toEqual([{
+        key: actions[0].id, name: actions[0].name, argv: ["sh", "-c", command, "review-assistant", ...flags],
+      }]);
+    }
   });
 
-  test("rejects unrelated Actions, direct OMP, and relative wrappers even with opt-in", () => {
+  test("rejects only records with missing, non-string, blank, or NUL-containing required fields", () => {
     const invalid = [
-      { id: "" }, { id: 42 }, { name: "  " }, { name: 42 },
-      { command: "" }, { command: ["nono", "omp"] }, { command: "'' omp" },
-      { command: "bun run dev" }, { command: "/usr/bin/wrapper --name=omp" },
-      { command: "nono ./omp" }, { command: "nono not/usr/bin/omp" },
-      { name: "review-omp-direct", command: "omp omp" }, { name: "review-omp-direct", command: '"/usr/bin/omp" omp' },
-      { command: "./wrapper omp" }, { command: "bin/wrapper omp" },
-      { name: "review-omp-relative", command: "./wrapper" }, { name: "review-omp-path", command: "wrapper" },
-      { command: "/usr/bin/omp/ omp" }, { command: "/ omp" }, { command: "/bin/. omp" },
+      { id: undefined }, { id: "" }, { id: 42 }, { id: "a\0b" },
+      { name: undefined }, { name: "  " }, { name: 42 }, { name: "a\0b" },
+      { command: undefined }, { command: "" }, { command: " \t\n" }, { command: ["nono", "omp"] },
+      { command: "nono omp bad\0arg" },
     ];
     for (const fields of invalid) expect(reviewLaunchers([{ ...actions[0], ...fields }])).toEqual([]);
-    expect(reviewLaunchers([{ ...actions[1], name: "Not opted in" }])).toEqual([]);
+    expect(reviewLaunchers([null, undefined, {}, { ...actions[0], command: "" }, actions[0]])).toEqual([launcher]);
     expect(reviewLaunchers(null)).toEqual([]);
   });
 
-  test("rejects all occurrences of duplicate Action ids, even if one occurrence is ineligible", () => {
+  test("keeps duplicate Action IDs individually selectable without masking ordinary IDs", () => {
     const unrelated = { ...actions[0], command: "bun test" };
-    expect(reviewLaunchers([null, actions[0], unrelated, actions[1]])).toEqual([launchers[1]]);
-    expect(reviewLaunchers([actions[0], actions[0]])).toEqual([]);
+    const duplicateKeys = reviewLaunchers([actions[0], unrelated]).map(({ key }) => key);
+    const colliding = { id: duplicateKeys[0], name: "Another action", command: "omp" };
+    const saved = [null, actions[0], unrelated, actions[1], actions[0], colliding];
+    const options = reviewLaunchers(saved);
+    expect(options.map(({ key: _key, ...option }) => option)).toEqual([
+      { name: launcher.name, argv: launcher.argv },
+      { name: unrelated.name, argv: ["bun", "test", ...flags] },
+      { name: launchers[1].name, argv: launchers[1].argv },
+      { name: launcher.name, argv: launcher.argv },
+      { name: colliding.name, argv: ["omp", ...flags] },
+    ]);
+    expect(new Set(options.map(({ key }) => key)).size).toBe(options.length);
+    expect(new Set(options.map(launchKey)).size).toBe(options.length);
+    expect(options[2].key).toBe(actions[1].id);
+    expect(options[4].key).toBe(colliding.id);
+    expect(reviewLaunchers(saved)).toEqual(options);
+    expect(launchKey(options[0])).not.toBe(launchKey(launcher));
+  });
+
+  test("requires new approval when the exact shell source changes", () => {
+    const action = { ...actions[0], command: shellCommand };
+    const withComment = { ...action, command: `${shellCommand} # saved comment` };
+    expect(launchKey(reviewLaunchers([action])[0])).not.toBe(launchKey(reviewLaunchers([withComment])[0]));
   });
 
   test("binds selection identity to Action id, name and exact argv, not terminal settings or quoting", () => {
@@ -150,6 +188,23 @@ describe("Review Assistant OMP worker", () => {
       source.dirtyPaths[0], source.revision, renamed.unrelated, evidence[0].machine, location.on, location.cwd]) {
       expect(input).not.toContain(privateValue);
     }
+  });
+
+  test("dispatches the exact shell launch, and rejects unrelated output from a literal action", async () => {
+    const [shell, plain] = reviewLaunchers([
+      { id: "script", name: "Script", command: shellCommand },
+      { id: "plain", name: "Plain", command: "bun run dev" },
+    ]);
+    const { calls, exec } = transport();
+    await expect(runAnalysis(exec, shell, location, snapshot)).resolves.toEqual(review);
+    const [{ input }] = calls;
+    expect(calls).toEqual([{
+      argv: ["sh", "-c", shellCommand, "review-assistant", ...flags], ...location, input, timeout: 120,
+    }]);
+    expect(requestData(input).patch).toBe(snapshot.patch);
+    const unrelated = transport(success("ordinary command output"));
+    await expect(runAnalysis(unrelated.exec, plain, location, snapshot)).rejects.toThrow(/selected action returned an invalid review/);
+    expect(unrelated.calls).toEqual([{ argv: ["bun", "run", "dev", ...flags], ...location, input, timeout: 120 }]);
   });
 
   test("omits binary blocks without dropping subsequent patches or text lookalikes", async () => {
@@ -254,11 +309,11 @@ describe("Review Assistant OMP worker", () => {
   test("reports execution and model failures without surfacing raw logs", async () => {
     const truncated = assistant("private partial review", { stopReason: "length" });
     for (const [result, expected] of [
-      [success(undefined, { code: 1, stderr: "private stderr" }), /Check the wrapper and OMP setup/],
+      [success(undefined, { code: 1, stderr: "private stderr" }), /Check the command and its dependencies/],
       [success(undefined, { timed_out: true }), /timed out after 120 seconds/],
       [success(undefined, { truncated: true }), /Herdr truncated/],
       [success(jsonl(messageEnd(truncated))), /OMP truncated the review/],
-      [success(jsonl({ type: "error", message: "private error" })), /Check the wrapper and OMP setup/],
+      [success(jsonl({ type: "error", message: "private error" })), /Check the command and its dependencies/],
     ]) {
       const error = await runResult(result).catch((failure) => failure);
       expect(error.message).toMatch(expected);
@@ -266,7 +321,7 @@ describe("Review Assistant OMP worker", () => {
     }
     const fail = async () => { throw new Error("private transport diagnostic"); };
     const error = await runAnalysis(fail, launcher, location, snapshot).catch((failure) => failure);
-    expect(error.message).toMatch(/Check the wrapper and OMP setup/);
+    expect(error.message).toMatch(/Check the command and its dependencies/);
     expect(error.message).not.toContain("private");
   });
 });

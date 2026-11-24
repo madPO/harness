@@ -17,10 +17,10 @@ Review Assistant adds a tab to the T3 right panel. It groups Git changes by purp
 
 1. Open **Select branch** and choose a local or remote-tracking branch. Use **Search branches** to filter by name.
 2. Open **Actions** to the left of **Select branch** and choose a review action. Check its machine, working directory, and exact arguments under **Review launcher**.
-3. Select **Compare** to send the review evidence through the selected launcher's OMP provider.
+3. Select **Compare** to run the selected action with review evidence on stdin.
 4. Select **Compare** again whenever you want a new comparison, even if you have not changed the selection.
 
-**Actions** lists every action saved in T3. Actions marked **Not a review launcher** appear in the list but can't be selected for Compare.
+You can select any action saved in T3. For a review result, choose an action that starts OMP and returns its JSON output.
 
 Review Assistant compares the checked-out branch with the branches' merge base. The review includes committed additions, deletions, and detected renames. It excludes staged, unstaged, and untracked changes. Influence also skips paths with local changes.
 
@@ -43,25 +43,25 @@ Use a fully qualified ref to distinguish identical branch names. For short names
 
 ## Set up a review launcher in Actions
 
-1. Open **Actions** in the T3 toolbar. Reuse an action that starts OMP through your trusted sandbox wrapper. If none exists, select **Add action**.
-2. Enter a name and a command such as `nono run --profile development -- omp`. Use your actual wrapper and profile.
+1. Open **Actions** in the T3 toolbar. Reuse an action that starts OMP, or select **Add action**.
+2. Enter a name and command, such as `omp` or `nono run --profile development -- omp`. Use a sandbox wrapper if you want sandboxing.
 3. Choose the action from **Actions** in Review Assistant. Review Assistant remembers the exact selection for the current machine and working directory.
 4. Select the action again if you rename it or change its command. Review Assistant never substitutes another action.
 
-Use a single command with literal arguments. Quote paths with spaces. Shell expansions, pipelines, and redirects aren't supported.
-If the wrapper hides the OMP command, use an absolute wrapper path and start the action name with `review-omp-`.
-Use a wrapper that forwards appended options and stdin to a fresh OMP invocation. Don't add prompts, credentials, session-resume flags, or options that enable tools or extensions.
+Review Assistant appends its worker flags to commands with literal arguments. Quote paths with spaces. No special action name is required.
 
-Review Assistant starts a fresh, headless OMP worker through Herdr Core in the selected worktree. The action's optional folder doesn't apply. The worker uses OMP's existing provider credentials and model settings. It doesn't prompt the focused agent or open a terminal.
+For commands that use shell syntax, Review Assistant runs the action with `sh -c`. The worker flags are available as positional arguments. Forward `"$@"` to OMP and leave stdin available, as in `exec "$HOME/.local/bin/omp" "$@"`.
+
+The selected action runs headless through Herdr Core in the review worktree. The action's optional folder doesn't apply. Review Assistant doesn't prompt the focused agent or open a terminal.
 
 Review Assistant no longer uses `programs.json` to discover launchers. Move any existing review launcher commands into T3 Actions.
 
 ### Data and consent
 
-- **Consent:** Selecting **Compare** authorizes the selected OMP provider to receive review evidence. Opening the panel and choosing a launcher do not send evidence.
+- **Consent:** Compare sends review evidence to the selected action. Choose a command you trust with that data. Choosing an action alone doesn't send evidence.
 - **Data sent:** Review Assistant sends text diffs, changed paths, and bounded excerpts of related unchanged code. The prompt limit is 96 KiB, and the review response limit is 256 KiB. The panel omits binary patch payloads.
 - **Desktop transport:** The bridge stages evidence briefly in the desktop app home. Keep that directory private, including any `HERDR_APP_HOME` override. On Windows, use a directory inside your private user profile. The bridge removes the staged evidence during normal operation.
-- **Worker access:** Review Assistant passes flags to disable tools, extensions, and session persistence. Use trusted wrappers that forward those flags. The remote sandbox still governs operating-system access.
+- **Worker access:** The worker flags disable OMP tools, extensions, and session persistence. Your action must forward those flags. Operating-system sandboxing depends on the command you choose.
 - **Provider retention:** Diffs can contain secrets. Check what the configured OMP provider logs or retains before comparing.
 
 ## Read and rerun a review

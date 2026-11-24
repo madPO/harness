@@ -19,27 +19,7 @@ const launcherPlace = ({ on, cwd }) => JSON.stringify([on, cwd]);
 const approvedLauncher = (place) => shared(LAUNCHER_APPROVALS)?.[place] ?? null;
 const findLauncher = (options, key) => key && options?.find((option) => launchKey(option) === key);
 const sameLaunchers = (a, b) => a.length === b.length && a.every((option, i) => launchKey(option) === launchKey(b[i]));
-const sameActionOptions = (a, b) => a.length === b.length && a.every(({ key, name, launcherIdentity }, i) =>
-  key === b[i].key && name === b[i].name && launcherIdentity === b[i].launcherIdentity);
 const idleReview = { status: "idle", message: null, result: null, expanded: new Set(), detail: null, canNavigate: false };
-
-function displayActions(list, launchers) {
-  if (!Array.isArray(list)) return [];
-  const identities = new Map(launchers.map((launcher) => [launcher.key, launchKey(launcher)]));
-  const occurrences = new Map();
-  const options = [];
-  for (const action of list) {
-    if (!action) continue;
-    const { id, name, command } = action;
-    if (typeof id !== "string" || !id.trim() || typeof name !== "string" || !name.trim()
-        || typeof command !== "string" || !command.trim()) continue;
-    // Keep duplicate rows visible with distinct IDs. The provider rejects duplicate launchers.
-    const occurrence = occurrences.get(id) ?? 0;
-    occurrences.set(id, occurrence + 1);
-    options.push({ key: JSON.stringify([id, occurrence]), name, launcherIdentity: identities.get(id) ?? null });
-  }
-  return options;
-}
 
 function preselect(options, name) {
   if (!name) return null;
@@ -62,7 +42,7 @@ function branchFeedback(session) {
 function launcherFeedback(session, launcher) {
   if (!session?.location.cwd) return "Select a workspace folder to choose a review action.";
   if (session.launcherNotice) return session.launcherNotice;
-  if (!session.launcherOptions.length) return "Add an OMP wrapper in Actions to enable Compare.";
+  if (!session.launcherOptions.length) return "Add an action in Actions on the T3 toolbar to enable Compare.";
   return launcher ? null : "Choose a review action to enable Compare.";
 }
 
@@ -79,7 +59,7 @@ function newSession(location, previous) {
   return {
     location, active: true, place: launcherPlace(location), target: previous?.target ?? null,
     inventory: null, error: null, reading: false, preselect: previous?.preselect ?? true, nextProbe: 0,
-    comparing: null, compared: null, launcherOptions: EMPTY_OPTIONS, actionOptions: EMPTY_OPTIONS,
+    comparing: null, compared: null, launcherOptions: EMPTY_OPTIONS,
     launcherApproval: null, launcherNotice: null,
   };
 }
@@ -159,7 +139,6 @@ export default class ReviewAssistant extends View {
       branchMessage,
       branchError: Boolean(session?.error),
       launcherOptions: session?.launcherOptions ?? EMPTY_OPTIONS,
-      actionOptions: session?.actionOptions ?? EMPTY_OPTIONS,
       selectedLauncher: launcher,
       launcherApproved: Boolean(approval),
       launcherMessage: launcherFeedback(session, launcher),
@@ -227,13 +206,7 @@ export default class ReviewAssistant extends View {
   }
 
   discoverLaunchers(session) {
-    const list = shared("t3-actions.actions")?.list;
-    const options = reviewLaunchers(list);
-    const actionOptions = displayActions(list, options);
-    if (!sameActionOptions(session.actionOptions, actionOptions)) {
-      session.actionOptions = actionOptions;
-      this.needsSync = true;
-    }
+    const options = reviewLaunchers(shared("t3-actions.actions")?.list);
     if (!sameLaunchers(session.launcherOptions, options)) {
       session.launcherOptions = options;
       this.needsSync = true;

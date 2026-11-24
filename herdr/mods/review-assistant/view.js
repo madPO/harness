@@ -10,7 +10,6 @@ const ACTIONS = { button: "review-actions", select: "review-actions-select", pop
   list: "review-actions-list", width: 240, context: "ReviewActionsMenu" };
 const ACTIONS_TAB = "review_actions_tab", ACTIONS_BACK_TAB = "review_actions_back_tab";
 const NO_ACTIONS = "No saved actions. Add an action in Actions on the T3 toolbar.";
-const NOT_A_LAUNCHER = "Not a review launcher";
 const EMPTY_ACTIONS = [];
 const SEARCH_LABEL = "Search branches";
 const SEARCH_CONTEXT = "ReviewBranchSearch";
@@ -30,14 +29,10 @@ const showPath = (path) => path.replace(/[\x00-\x1f\x7f]/g, (c) => c === "\n" ? 
 const launchString = (value) => JSON.stringify(value).replace(/[\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
   (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 const launcherLabel = ({ name, key }) => `${showPath(name)} (${launchString(key)})`;
-const availableActions = (model) => model.actionOptions ?? EMPTY_ACTIONS;
+const availableActions = (model) => model.launcherOptions ?? EMPTY_ACTIONS;
 const comparingReview = (model) => model.launcherComparing || model.status === "loading";
 const canPickAction = (view, model) => !comparingReview(model) && typeof view.selectLauncher === "function";
-const actionIndex = (options, selected) => {
-  if (!selected) return -1;
-  const identity = launchKey(selected);
-  return options.findIndex((option) => option.launcherIdentity === identity);
-};
+const actionIndex = (options, selected) => selected ? options.findIndex((option) => option.key === selected.key) : -1;
 const canOpenFiles = (view, model) => model.canNavigate && typeof view.openFile === "function";
 const canOpenRefs = (view, model) => model.canNavigate && typeof view.openReference === "function";
 
@@ -97,7 +92,7 @@ export function syncReviewView(view, model, cx) {
     picker.overTrigger = false;
   }
   picker.options = options;
-  const actions = state.actions, actionOptions = availableActions(model);
+  const actions = state.actions, launcherOptions = availableActions(model);
   const actionEnabled = canPickAction(view, model);
   if (actionEnabled) {
     keys.add("actions");
@@ -106,13 +101,13 @@ export function syncReviewView(view, model, cx) {
   if (!actionEnabled || actions.location !== model.launcherLocation) {
     actions.menu = null;
     actions.overTrigger = false;
-  } else if (actions.options !== actionOptions && actions.menu) {
-    actions.menu.at = actionIndex(actionOptions, model.selectedLauncher);
+  } else if (actions.options !== launcherOptions && actions.menu) {
+    actions.menu.at = actionIndex(launcherOptions, model.selectedLauncher);
     actions.menu.top = 0;
-    if (actions.menu.at >= 0) revealPickerRow(actions.menu, actionOptions.length, actions.menu.at);
+    if (actions.menu.at >= 0) revealPickerRow(actions.menu, launcherOptions.length, actions.menu.at);
   }
   actions.location = model.launcherLocation;
-  actions.options = actionOptions;
+  actions.options = launcherOptions;
   if (model.launcherApproved && typeof view.clearLauncher === "function") keys.add("clear-launcher");
   const result = resultFor(model);
   if (result) {
@@ -433,16 +428,16 @@ function actionList(view, t, model, actions, { keys, focus, active, dismiss }) {
   const zoom = Number(settings()?.zoom) || 1;
   const first = Math.floor(menu.top / PICKER.row);
   const end = Math.min(count, Math.ceil((menu.top + height) / PICKER.row));
-  const selectedKey = model.selectedLauncher ? launchKey(model.selectedLauncher) : null;
+  const selectedKey = model.selectedLauncher?.key;
   const visible = (i) => i * PICKER.row < menu.top + height && (i + 1) * PICKER.row > menu.top;
   const currentRows = () => active() && options === actions.options && launcherLocation === actions.location;
-  const choose = (identity, cx) => {
-    if (!identity || !launcherLocation || !currentRows()) return;
+  const choose = (option, cx) => {
+    if (!option || !launcherLocation || !currentRows()) return;
     const live = view.model();
     if (!canPickAction(view, live) || launcherLocation !== live.launcherLocation || options !== availableActions(live)) return;
     dismiss(cx, true);
     // The controller rechecks the exact identity and rendered workspace before changing approval.
-    view.selectLauncher(identity, cx, launcherLocation);
+    view.selectLauncher(launchKey(option), cx, launcherLocation);
   };
   const tabOut = (backward, cx) => {
     if (!active()) return;
@@ -454,9 +449,10 @@ function actionList(view, t, model, actions, { keys, focus, active, dismiss }) {
   // Render only visible rows and reveal the highlighted row during keyboard navigation.
   const rows = [];
   for (let i = first; i < end; i++) {
-    const { key, launcherIdentity: identity, name: actionName } = options[i];
-    const unavailable = identity === null ? NOT_A_LAUNCHER : launcherLocation ? null : "Choose a workspace folder";
-    const selected = !unavailable && identity === selectedKey;
+    const option = options[i];
+    const { key, name: actionName } = option;
+    const unavailable = launcherLocation ? null : "Choose a workspace folder";
+    const selected = !unavailable && key === selectedKey;
     const name = showPath(actionName);
     rows.push(h_flex().id(`review-action-option-${key}`).h(PICKER.row).absolute()
       .left(0).right(0).top(i * PICKER.row - menu.top)
@@ -474,7 +470,7 @@ function actionList(view, t, model, actions, { keys, focus, active, dismiss }) {
       })
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        if (visible(i)) choose(identity, cx);
+        if (visible(i)) choose(option, cx);
       })
       .child(div().flex_1().min_w(0).truncate().child(name))
       .when(Boolean(unavailable), (el) => el.child(secondary(t, unavailable).text_size(UI.label).flex_none()))
@@ -505,7 +501,7 @@ function actionList(view, t, model, actions, { keys, focus, active, dismiss }) {
       if (mods?.shift || !currentRows()) return;
       if (e.key === "enter" || e.key === "space") {
         cx.stop_propagation();
-        choose(options[menu.at]?.launcherIdentity, cx);
+        choose(options[menu.at], cx);
         return;
       }
       if (!["up", "down", "home", "end"].includes(e.key)) return;
@@ -628,7 +624,7 @@ function reviewLauncher(view, t, model) {
   const feedback = model.launcherMessage ?? (comparing ? "Comparing branches…"
     : selectedLauncher ? null
     : launcherOptions.length ? "Choose a review action in Actions to inspect its arguments."
-    : "Add an OMP wrapper in Actions to enable Compare.");
+    : "Add an action in Actions on the T3 toolbar to enable Compare.");
 
   return v_flex().id("review-launcher").min_w(0).gap(6).role("group").accessibility_label("Review launcher")
     .child(heading("Review launcher"))
@@ -650,8 +646,7 @@ function reviewLauncher(view, t, model) {
       .when(Boolean(canClear), (el) => el.child(h_flex().min_w(0)
         .child(launcherButton(view, t, "clear-launcher", "Clear approval", t.background, !comparing,
           (cx) => view.clearLauncher(cx, launcherLocation))))))
-    .child(div().min_w(0).child("Choose only actions with wrappers you trust to forward the OMP safety flags."))
-    .child(div().min_w(0).child("Compare sends bounded Git evidence through the selected action."))
+    .child(div().min_w(0).child("Compare sends Git evidence to the selected action. Only compare with actions you trust."))
     .child(h_flex().min_w(0).child(launcherButton(view, t, "compare", "Compare", t.raised, canCompare,
       (cx) => view.compare(cx, identity, model.targetBranch, launcherLocation))));
 }

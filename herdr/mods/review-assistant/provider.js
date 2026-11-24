@@ -4,9 +4,9 @@ const REQUEST_LIMIT = 96 * 1024;
 const RESPONSE_LIMIT = 256 * 1024;
 // Print streams can repeat the prompt and response in snapshots and emit per-token events.
 const STREAM_LIMIT = 4 * 1024 * 1024;
-const INVALID_RESPONSE = "The review launcher returned an invalid review. Check that the wrapper forwards OMP JSON print output, then try again.";
-const LAUNCH_FAILURE = "Could not run the review launcher. Check Bun and hc on the Desktop PATH. Check the wrapper and OMP setup in the selected workspace.";
-const TOOL_FAILURE = "The review launcher attempted to use tools. Check that the wrapper forwards the OMP safety flags.";
+const INVALID_RESPONSE = "The selected action returned an invalid review. Choose an action that reads the review from stdin and returns OMP JSON output.";
+const LAUNCH_FAILURE = "Couldn't run the selected action. Check the command and its dependencies in the selected workspace. Check that Bun and hc are on the Desktop PATH.";
+const TOOL_FAILURE = "The selected action attempted to use tools. Choose an action that honors the OMP safety flags.";
 const TEXT_LIMIT_ERROR = "The analysis response exceeded 256 KiB. Review fewer changes or choose another launcher.";
 
 const WORKER_ARGS = [
@@ -43,10 +43,11 @@ function parseJson(text, error) {
   }
 }
 
-// Decode literal shell words only. The review transport launches this argv without a shell.
+// Return null for shell syntax so the chosen action can run unchanged through sh.
 function literalCommand(command) {
-  if (typeof command !== "string" || /[\0\r\n]/.test(command)
-      || /^[ \t]*(?:if|then|else|elif|fi|do|done|case|esac|while|until|for|in)(?:[ \t]|$)/.test(command)) return null;
+  if (/[\r\n]/.test(command)
+      || /^[ \t]*(?:if|then|else|elif|fi|do|done|case|esac|while|until|for|in|!)(?:[ \t]|$)/.test(command)
+      || /^[ \t]*[a-zA-Z_][a-zA-Z0-9_]*=/.test(command)) return null;
   const argv = [];
   let word = "", started = false, quote = null;
   for (let i = 0; i < command.length; i++) {
@@ -85,34 +86,35 @@ function literalCommand(command) {
   return argv;
 }
 
-const isOmp = (arg) => arg === "omp" || (arg.startsWith("/") && arg.endsWith("/omp"));
+const validActionField = (value) => typeof value === "string" && value.trim() !== "" && !value.includes("\0");
 
-// Users must trust wrappers to forward stdin and the worker flags to OMP.
-// Configured arguments must not enable tools or extensions, or resume a session.
 export function reviewLaunchers(actions) {
   if (!Array.isArray(actions)) return [];
-  const seen = new Set();
-  const duplicates = new Set();
-  for (const action of actions) {
-    const key = action?.id;
-    if (typeof key !== "string" || !key.trim()) continue;
-    if (seen.has(key)) duplicates.add(key);
-    seen.add(key);
-  }
+  const counts = new Map();
   const launchers = [];
   for (const action of actions) {
     if (!action) continue;
     const { id: key, name, command } = action;
-    if (!seen.has(key) || duplicates.has(key) || typeof name !== "string" || !name.trim()) continue;
+    if (!validActionField(key) || !validActionField(name) || !validActionField(command)) continue;
     const argv = literalCommand(command);
-    const executable = argv?.[0];
-    if (!executable || isOmp(executable)) continue;
-    const absolute = executable.startsWith("/");
-    const basename = executable.slice(executable.lastIndexOf("/") + 1);
-    if (!basename || basename === "." || basename === ".."
-        || (!absolute && !/^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/.test(executable))) continue;
-    if (!argv.some((arg, i) => i > 0 && isOmp(arg)) && !(absolute && name.startsWith("review-omp-"))) continue;
-    launchers.push({ key, name, argv: [...argv, ...WORKER_ARGS] });
+    // The script receives the worker arguments as $@ and must forward them explicitly.
+    launchers.push({
+      key, name,
+      argv: argv?.[0] ? [...argv, ...WORKER_ARGS] : ["sh", "-c", command, "review-assistant", ...WORKER_ARGS],
+    });
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  const occurrences = new Map();
+  for (const launcher of launchers) {
+    const { key: id } = launcher;
+    if (counts.get(id) === 1) continue;
+    const occurrence = occurrences.get(id) ?? 0;
+    occurrences.set(id, occurrence + 1);
+    // Encode duplicate occurrences without colliding with any ordinary saved ID.
+    let key = JSON.stringify([id, occurrence]);
+    while (counts.has(key)) key = `:${key}`;
+    launcher.key = key;
   }
   return launchers;
 }
