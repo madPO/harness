@@ -1,6 +1,7 @@
 import { div } from "gpui-kit";
 import { Button, Editor, EditorState, Input, InputState, Popup, Select, h_flex, v_flex } from "gpui-base";
 import { settings, theme } from "herdr";
+import { launchKey } from "./provider.js";
 
 const UI = { heading: 13, text: 12, label: 11, radius: 5, control: 24, inset: 12, detail: 168 };
 const PICKER = { button: "review-target-branch", select: "review-branch-select", popup: "review-branch-popup",
@@ -19,7 +20,11 @@ const resultFor = (model) => model.status === "ready" || model.status === "stale
 const groupKey = (group) => `group:${group.id}`;
 const fileKey = (group, path) => `file:${JSON.stringify([group.id, path])}`;
 const refKey = (index, ref) => `ref:${JSON.stringify([index, ref.path, ref.symbol, ref.line])}`;
+const launcherOptionKey = (launcher) => `launcher-option:${launcher.key}`;
 const showPath = (path) => path.replace(/[\x00-\x1f\x7f]/g, (c) => c === "\n" ? "\\n" : c === "\t" ? "\\t" : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+const launchString = (value) => JSON.stringify(value).replace(/[\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
+  (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+const launcherLabel = ({ name, key }) => `${showPath(name)} (${launchString(key)})`;
 const canOpenFiles = (view, model) => model.canNavigate && typeof view.openFile === "function";
 const canOpenRefs = (view, model) => model.canNavigate && typeof view.openReference === "function";
 
@@ -60,6 +65,7 @@ function closeBranchSearch(picker) {
 export function syncReviewView(view, model, cx) {
   const state = view.reviewView ??= {
     handles: new Map(), focused: null, watch: null, detail: null, editor: null,
+    launcher: null,
     picker: { search: null },
   };
   const keys = new Set();
@@ -77,6 +83,8 @@ export function syncReviewView(view, model, cx) {
     picker.overTrigger = false;
   }
   picker.options = options;
+  for (const option of model.launcherOptions ?? []) keys.add(launcherOptionKey(option));
+  if (model.launcherApproved && typeof view.clearLauncher === "function") keys.add("clear-launcher");
   const result = resultFor(model);
   if (result) {
     for (const group of result.groups) {
@@ -123,6 +131,20 @@ export function syncReviewView(view, model, cx) {
     }) : null;
   }
   state.detail = detail;
+
+  const selected = model.selectedLauncher;
+  const identity = selected ? launchKey(selected) : null;
+  if (identity !== (state.launcher?.identity ?? null)) {
+    state.launcher?.editor.release();
+    const argv = selected ? `[${selected.argv.map(launchString).join(", ")}]` : null;
+    state.launcher = argv === null ? null : {
+      identity, argv,
+      editor: EditorState.new({
+        value: argv, readonly: true, soft_wrap: true,
+        font_family: settings()?.font_family, font_size: UI.text,
+      }),
+    };
+  }
 }
 
 export function closeReviewView(view) {
@@ -132,6 +154,7 @@ export function closeReviewView(view) {
   state.watch?.cancel();
   for (const handle of state.handles.values()) handle.release();
   state.editor?.release();
+  state.launcher?.editor.release();
   view.reviewView = null;
 }
 
@@ -373,16 +396,68 @@ function branchPicker(view, t, model) {
 }
 
 function comparisonHeader(view, t, model) {
-  const focus = view.reviewView?.handles.get("compare");
-  const compare = Button.new("review-compare").h(PICKER.control).px(8).flex_none().rounded(UI.radius)
-    .bg(t.raised).text_color(t.foreground).text_size(UI.label).font_medium().disabled(!model.canCompare)
-    .when(!model.canCompare, (el) => el.opacity(0.5))
-    .when(Boolean(model.canCompare && focus), (el) => focusRing(el.track_focus(focus).tab_index(0).cursor_pointer()
+  return h_flex().id("review-comparison").flex_none().min_w(0).items_center().p(UI.inset)
+    .border_b(1).border_color(t.border).child(branchPicker(view, t, model));
+}
+
+function launcherButton(view, t, key, label, bg, enabled, action) {
+  const focus = view.reviewView?.handles.get(key);
+  return Button.new(`review-${key}`).min_h(PICKER.control).min_w(0).px(8).py(3).flex_none().rounded(UI.radius)
+    .bg(bg).text_color(t.foreground).text_size(UI.label).font_medium().disabled(!enabled)
+    .accessibility_label(label)
+    .when(!enabled, (el) => el.opacity(0.5))
+    .when(enabled, (el) => el.on_click((_event, cx) => action(cx)))
+    .when(Boolean(enabled && focus), (el) => focusRing(el.track_focus(focus).tab_index(0).cursor_pointer()
       .hover((style) => style.bg(t.hover)).active((style) => style.bg(t.selected)), focus, t))
-    .on_click((_e, cx) => { if (model.canCompare) view.compare(cx); })
-    .child("Compare");
-  return h_flex().id("review-comparison").flex_none().min_w(0).items_center().p(UI.inset).gap(4)
-    .border_b(1).border_color(t.border).child(branchPicker(view, t, model)).child(compare);
+    .child(div().min_w(0).child(label));
+}
+
+function reviewLauncher(view, t, model) {
+  const { launcherOptions = [], selectedLauncher, launcherLocation, launcherBusy, launcherError } = model;
+  const comparing = model.launcherComparing || model.status === "loading";
+  const identity = selectedLauncher ? launchKey(selectedLauncher) : null;
+  const preview = view.reviewView?.launcher;
+  const currentPreview = preview?.identity === identity ? preview : null;
+  const canSelect = !launcherBusy && !comparing && typeof view.selectLauncher === "function";
+  const canClear = model.launcherApproved && typeof view.clearLauncher === "function";
+  const canCompare = Boolean(model.canCompare && currentPreview && !launcherBusy && !comparing);
+  const feedback = model.launcherMessage ?? (comparing ? "Comparing branches…"
+    : launcherBusy ? "Finding review launchers…"
+    : selectedLauncher ? null
+    : launcherOptions.length ? "Choose a review launcher to inspect its arguments."
+    : "No review launcher is available. Check the agent programs configured for this workspace.");
+
+  return v_flex().id("review-launcher").min_w(0).gap(6).role("group").accessibility_label("Review launcher")
+    .child(heading("Review launcher"))
+    .when(Boolean(feedback), (el) => el.child(secondary(t, feedback)
+      .when(Boolean(launcherError), (message) => message.text_color(t.ansi1))
+      .role(launcherError ? "alert" : "status")))
+    .when(launcherOptions.length > 0, (el) => el.child(v_flex().min_w(0).gap(4)
+      .role("group").accessibility_label("Available review launchers")
+      .children(launcherOptions.map((option) => {
+        const key = launchKey(option), selected = key === identity;
+        const label = `${launcherLabel(option)}${selected ? " — selected" : ""}`;
+        return launcherButton(view, t, launcherOptionKey(option), label, selected ? t.selected : t.input, canSelect,
+          (cx) => view.selectLauncher(key, cx, launcherLocation)).w_full().border_1().border_color(t.border);
+      }))))
+    .child(v_flex().min_w(0).p(8).gap(4).rounded(UI.radius).border_1().border_color(t.border).bg(t.raised)
+      .child(div().min_w(0).font_medium()
+        .child(selectedLauncher ? `Selected agent: ${launcherLabel(selectedLauncher)}`
+          : "No review launcher selected"))
+      .when(Boolean(launcherLocation?.cwd), (el) => el
+        .child(secondary(t, `Workspace machine: ${launcherLocation.on ? showPath(launcherLocation.on) : "Herdr Core (local)"}`))
+        .child(secondary(t, `Working directory: ${showPath(launcherLocation.cwd)}`)))
+      .when(Boolean(currentPreview), (el) => el
+        .child(div().font_medium().child("Exact launch arguments (JSON)"))
+        .child(div().h(UI.detail).w_full().min_w(0).overflow_hidden().rounded(UI.radius).border_1().border_color(t.border)
+          .role("group").accessibility_label(`Exact launch arguments: ${currentPreview.argv}`)
+          .child(Editor.new(currentPreview.editor).size_full())))
+      .when(Boolean(canClear), (el) => el.child(h_flex().min_w(0)
+        .child(launcherButton(view, t, "clear-launcher", "Clear launcher", t.background, !comparing,
+          (cx) => view.clearLauncher(cx, launcherLocation))))))
+    .child(div().min_w(0).child("Selecting Compare sends bounded Git evidence through the selected OMP provider."))
+    .child(h_flex().min_w(0).child(launcherButton(view, t, "compare", "Compare", t.raised, canCompare,
+      (cx) => view.compare(cx, identity, model.targetBranch, launcherLocation))));
 }
 
 function groupCard(view, t, model, group) {
@@ -460,6 +535,7 @@ export function renderReview(view, model) {
       .child(v_flex().w_full().min_w(0).p(UI.inset).gap(12)
         .when(Boolean(model.branchMessage), (el) => el.child(secondary(t, model.branchMessage)
           .role(model.branchError ? "alert" : "status")))
+        .child(reviewLauncher(view, t, model))
         .child(logicalChanges(view, t, model, result))
         .child(influence(view, t, model, result))))
     .when(Boolean(model.detail), (el) => el.child(detailRegion(view, t, model.detail)));

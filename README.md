@@ -182,6 +182,7 @@ The T3 bindings target macOS. On Linux and Windows, rebind keys as described in 
 
 [Install and use Review Assistant](herdr/review-assistant.md) from the right panel in `herdr-t3`.
 It groups Git changes by purpose and highlights related unchanged code for human review.
+Run each review in a fresh OMP worker on the selected Linux workspace machine. Review Assistant displays the sandbox launcher before you compare.
 Review Assistant is separate from the optional upstream T3 Review mod.
 
 ### Git panels

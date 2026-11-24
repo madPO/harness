@@ -23,7 +23,7 @@ const influence = {
 };
 const review = (overrides) => ({ groups: [{ ...group, ...overrides }], influence: [] });
 const withInfluence = (overrides) => ({ groups: [group], influence: [{ ...influence, ...overrides }] });
-const invalid = "The analysis provider returned an invalid review. Try again or check the provider configuration.";
+const invalid = "The review launcher returned an invalid review. Check the selected OMP launcher, then try again.";
 
 function expectInvalid(raw, inventory = files) {
   expect(() => validateAnalysis(raw, inventory)).toThrow(invalid);

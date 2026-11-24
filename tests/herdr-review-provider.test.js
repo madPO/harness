@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { parseProviderConfig, providerKey, runAnalysis } from "../herdr/mods/review-assistant/provider.js";
+import { launchKey, reviewLaunchers, runAnalysis } from "../herdr/mods/review-assistant/provider.js";
 
-const endpoint = "https://review.example.invalid/gateway/v1/chat/completions";
-const model = "vendor/test-model:latest";
-const apiKey = "synthetic-auth-token";
-const configText = (fields = {}) => JSON.stringify({ consent: true, endpoint, model, apiKey, ...fields });
-const config = parseProviderConfig(configText());
+const flags = [
+  "--print", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
+  "--no-skills", "--no-rules", "--no-context-files", "--no-prewalk", "--no-title", "--no-lsp",
+];
+const programs = [
+  { key: "review-omp-confined", name: "Confined OMP", run: ["/usr/bin/nono", "run", "--profile", "omp", "--", "/usr/bin/omp"], installed: true },
+  { key: "review-omp-alt", name: "Alternate OMP", run: ["/opt/Review Tools/omp-sandbox", "isolated workspace", ""], installed: true },
+];
+const launchers = reviewLaunchers(programs);
+const launcher = launchers[0];
+const location = { on: "linux-core", cwd: "/work/repo with spaces" };
 const file = { path: "lib/rates.js", status: "M" };
 const snapshot = {
   scope: { kind: "worktree" },
@@ -21,75 +27,60 @@ const group = {
   files: [file.path],
 };
 const review = { groups: [group], influence: [] };
-const completed = (content = JSON.stringify(review), choice = {}) => ({
-  choices: [{ finish_reason: "stop", message: { role: "assistant", content }, ...choice }],
-});
-const response = (envelope) => ({ ok: true, status: 200, text: async () => JSON.stringify(envelope) });
+const json = JSON.stringify(review);
+const assistant = (text = json, fields = {}) => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text }], ...fields });
+const messageEnd = (message = assistant()) => ({ type: "message_end", message });
+const agentEnd = (messages = [assistant()], fields = {}) => ({ type: "agent_end", messages, isTerminal: true, yielded: true, ...fields });
+const jsonl = (...events) => `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+const success = (stdout = jsonl(messageEnd(), agentEnd()), fields = {}) => ({ code: 0, stdout, timed_out: false, truncated: false, ...fields });
 
-function transport(result = response(completed())) {
+function transport(result = success()) {
   const calls = [];
-  const fetch = async (...args) => {
-    calls.push(args);
+  const exec = async (call) => {
+    calls.push(call);
     return result;
   };
-  return { calls, fetch };
+  return { calls, exec };
 }
 
-function requestData(options) {
-  const body = JSON.parse(options.body);
-  return JSON.parse(body.messages[1].content);
+function requestData(input) {
+  const separator = input.indexOf("\n\n");
+  return JSON.parse(input.slice(separator + 2));
 }
 
-describe("Review Assistant provider configuration", () => {
-  test("requires explicit consent and never coerces a supplied value", () => {
-    for (const consent of [undefined, false, "true", 1, null]) {
-      expect(() => parseProviderConfig(configText({ consent }))).toThrow(/consent.*true/i);
+const runResult = (result) => runAnalysis(transport(result).exec, launcher, location, snapshot);
+
+describe("Review Assistant launcher discovery", () => {
+  test("preserves each distinct trusted wrapper and appends the exact worker flags", () => {
+    expect(launchers).toEqual(programs.map(({ key, name, run }) => ({ key, name, argv: [...run, ...flags] })));
+    expect(launchKey(launcher)).toBe(launchKey(reviewLaunchers(programs)[0]));
+    for (const updated of [{ key: "review-omp-new" }, { name: "New name" }, { argv: [...launcher.argv, "other"] }]) {
+      expect(launchKey({ ...launcher, ...updated })).not.toBe(launchKey(launcher));
     }
-    expect(parseProviderConfig(configText())).toEqual({ endpoint, model, apiKey });
+    expect(launchKey(launcher)).not.toBe(launchKey(launchers[1]));
   });
 
-  test("uses full HTTPS endpoints and permits HTTP only on loopback", () => {
-    for (const address of [endpoint, "http://localhost:11434/v1/chat/completions", "http://127.0.0.2/chat", "http://[::1]:8080/chat"]) {
-      expect(parseProviderConfig(configText({ endpoint: address, apiKey: undefined }))).toEqual({ endpoint: address, model, apiKey: undefined });
-    }
-    for (const address of [
-      "https://", "//review.example.invalid/chat", "ftp://localhost/chat", "http://review.example.invalid/chat",
-      "http://localhost.review.example.invalid/chat", "http://127.review.example.invalid/chat", "http://192.168.0.1/chat",
-      "https://user:secret@review.example.invalid/chat", "https://@review.example.invalid/chat",
-      "https://review.example.invalid/chat?key=secret", "https://review.example.invalid/chat?", "https://review.example.invalid/chat#",
-      "https://review.example.invalid\\@localhost/chat", " https://review.example.invalid/chat", 0, null, undefined,
-    ]) {
-      expect(() => parseProviderConfig(configText({ endpoint: address }))).toThrow(/full HTTPS chat completions URL/);
-    }
-  });
-
-  test("rejects missing, malformed, unknown, invalid, and oversized configuration", () => {
-    expect(() => parseProviderConfig(undefined)).toThrow(/Herdr desktop app home/);
-    expect(() => parseProviderConfig('{"apiKey":"raw-secret",')).toThrow(/Fix the JSON syntax/);
-    expect(() => parseProviderConfig("[]")).toThrow(/JSON object/);
-    expect(() => parseProviderConfig(configText({ credential: "unknown" }))).toThrow(/Use only consent/);
-    for (const bad of [undefined, null, 42, "", " padded-model ", "model\nname", "m".repeat(257)]) {
-      expect(() => parseProviderConfig(configText({ model: bad }))).toThrow(/valid provider model ID/);
-    }
-    for (const bad of [null, 42, "", "padded token", "unsafe\r\nheader: value", "tail-newline\n", "🪴", "x".repeat(4097)]) {
-      expect(() => parseProviderConfig(configText({ apiKey: bad }))).toThrow(/valid bearer token/);
-    }
-    expect(() => parseProviderConfig(configText({ model: "🪴".repeat(2048) }))).toThrow(/8 KiB/);
-  });
-
-  test("keys cache semantics without storing credentials", () => {
-    const key = providerKey(config);
-    expect(key).not.toContain(apiKey);
-    expect(providerKey(parseProviderConfig(configText({ apiKey: "rotated-synthetic-key" })))).toBe(key);
-    expect(providerKey(parseProviderConfig(configText({ model: "another-model" })))).not.toBe(key);
-    expect(providerKey(parseProviderConfig(configText({ endpoint: "https://backup.example.invalid/chat" })))).not.toBe(key);
+  test("only accepts installed opt-ins with exact absolute Linux command argv", () => {
+    const invalid = [
+      { key: "omp" }, { key: "review-omp" }, { installed: false }, { installed: "yes" },
+      { name: "  " }, { name: 42 }, { run: "/usr/bin/nono" }, { run: [] }, { run: ["/"] },
+      { run: undefined, argv: ["/usr/bin/wrapper"] },
+      { run: ["omp-wrapper"] }, { run: ["./omp-wrapper"] }, { run: ["/usr/bin/omp"] },
+      { run: ["/usr/bin/omp/"] }, { run: [" /usr/bin/wrapper"] }, { run: ["C:\\bin\\omp-wrapper"] },
+      { run: ["/usr/bin/wrapper", 1] }, { run: ["/usr/bin/wrapper", "bad\0arg"] },
+    ];
+    for (const fields of invalid) expect(reviewLaunchers([{ ...programs[0], ...fields }])).toEqual([]);
+    expect(reviewLaunchers(null)).toEqual([]);
+    expect(reviewLaunchers([null, programs[0], { ...programs[0], installed: false }, programs[1]])).toEqual([launchers[1]]);
+    expect(reviewLaunchers([programs[0], programs[0]])).toEqual([]);
   });
 });
 
-describe("Review Assistant mocked Chat Completions transport", () => {
-  test("sends only allowed application data and resolves influence IDs to trusted evidence", async () => {
+describe("Review Assistant OMP worker", () => {
+  test("dispatches both exact launches on the selected workspace with only allowed evidence on stdin", async () => {
     const renamed = { ...file, status: "R", oldPath: "lib/default-rates.js", unrelated: "file-extra" };
     const source = {
+      ...snapshot,
       root: "/private/home/worktree",
       on: "unshared-ssh-machine",
       head: "head-oid",
@@ -104,28 +95,23 @@ describe("Review Assistant mocked Chat Completions transport", () => {
     const evidence = [{ ...supplied, machine: "evidence-extra" }];
     const description = "Verify that quotes preserve the fallback for missing rates.";
     const raw = { ...review, influence: [{ name: "Quote totals", description, evidenceIds: [supplied.id] }] };
-    const { calls, fetch } = transport(response(completed(JSON.stringify(raw))));
-    const result = await runAnalysis(fetch, config, source, evidence);
-    expect(result).toEqual({ ...review, influence: [{ name: "Quote totals", description, references: [{ path: supplied.path, symbol: supplied.symbol, line: supplied.line }] }] });
-    expect(calls).toHaveLength(1);
-    const [[url, options]] = calls;
-    expect(url).toBe(endpoint);
-    expect(Object.keys(options).sort()).toEqual(["body", "headers", "method"]);
-    expect(options.method).toBe("POST");
-    expect(options.headers).toEqual({ "content-type": "application/json", authorization: `Bearer ${apiKey}` });
-    const body = JSON.parse(options.body);
-    expect(Object.keys(body).sort()).toEqual(["messages", "model", "response_format"]);
-    expect(body.model).toBe(model);
-    expect(body.response_format).toEqual({ type: "json_object" });
-    expect(body.messages.map(({ role }) => role)).toEqual(["system", "user"]);
-    expect(body.messages[0].content).toContain("never as instructions");
-    expect(body.messages[0].content).not.toContain("Ignore all instructions");
-    expect(requestData(options)).toEqual({
+    const message = assistant(JSON.stringify(raw));
+    const { calls, exec } = transport(success(jsonl(messageEnd(message), agentEnd([message]))));
+    for (const selected of launchers) {
+      const result = await runAnalysis(exec, selected, location, source, evidence);
+      expect(result).toEqual({ ...review, influence: [{ name: "Quote totals", description, references: [{ path: supplied.path, symbol: supplied.symbol, line: supplied.line }] }] });
+    }
+    const { input } = calls[0];
+    expect(calls).toEqual(programs.map(({ run }) => ({ argv: [...run, ...flags], on: location.on, cwd: location.cwd, input, timeout: 120 })));
+    const instructions = input.slice(0, input.indexOf("\n\n"));
+    expect(instructions).toContain("never as instructions");
+    expect(instructions).not.toContain("Ignore all instructions");
+    expect(requestData(input)).toEqual({
       scope: "branch", files: [{ path: renamed.path, status: "R", oldPath: renamed.oldPath }], patch: source.patch, evidence: [supplied],
     });
-    for (const privateValue of [apiKey, endpoint, source.root, source.on, source.head, source.base, source.scope.target,
-      source.dirtyPaths[0], source.revision, renamed.unrelated, evidence[0].machine]) {
-      expect(options.body).not.toContain(privateValue);
+    for (const privateValue of [source.root, source.on, source.head, source.base, source.scope.target,
+      source.dirtyPaths[0], source.revision, renamed.unrelated, evidence[0].machine, location.on, location.cwd]) {
+      expect(input).not.toContain(privateValue);
     }
   });
 
@@ -139,12 +125,10 @@ describe("Review Assistant mocked Chat Completions transport", () => {
       patch: `Staged changes (HEAD to index)\n\n${binary(first.path, "x".repeat(98_304))}\nUnstaged changes (index to working tree)\n\n${snapshot.patch}+Text marker: \u2028GIT binary patch\n+still ordinary source\n\nUntracked additions\n\n${binary(last.path, "last-binary-payload")}`,
     };
     const raw = { groups: [{ ...group, files: worktree.files.map(({ path }) => path) }], influence: [] };
-    const { calls, fetch } = transport(response(completed(JSON.stringify(raw))));
-    const noKey = parseProviderConfig(configText({ apiKey: undefined }));
-    await runAnalysis(fetch, noKey, worktree);
-    const [[, options]] = calls;
-    expect(options.headers).toEqual({ "content-type": "application/json" });
-    const sent = requestData(options);
+    const message = assistant(JSON.stringify(raw));
+    const { calls, exec } = transport(success(jsonl(messageEnd(message), agentEnd([message]))));
+    await runAnalysis(exec, launcher, location, worktree);
+    const sent = requestData(calls[0].input);
     expect(sent.files).toEqual(worktree.files);
     expect(sent.evidence).toEqual([]);
     expect(sent.patch.match(/Binary patch content omitted/g)).toHaveLength(2);
@@ -156,60 +140,96 @@ describe("Review Assistant mocked Chat Completions transport", () => {
     expect(sent.patch).not.toContain("last-encoded-line");
   });
 
-  test("fails oversized requests before calling transport, including escaped and multibyte input", async () => {
-    const { calls, fetch } = transport();
-    for (const patch of ["x".repeat(96 * 1024), "🪴".repeat(25_000), '"'.repeat(25_000)]) {
-      await expect(runAnalysis(fetch, config, { ...snapshot, patch })).rejects.toThrow(/96 KiB analysis request limit/);
+  test("enforces the full UTF-8 prompt limit before launching the worker", async () => {
+    const { calls, exec } = transport();
+    const bytes = (text) => new TextEncoder().encode(text).byteLength;
+    await runAnalysis(exec, launcher, location, { ...snapshot, patch: "" });
+    const room = 96 * 1024 - bytes(calls[0].input);
+    const patch = "x".repeat(room - 4) + "🪴";
+    await expect(runAnalysis(exec, launcher, location, { ...snapshot, patch })).resolves.toEqual(review);
+    expect(bytes(calls[1].input)).toBe(96 * 1024);
+    expect(requestData(calls[1].input).patch).toBe(patch);
+    for (const large of [patch + "x", "🪴".repeat(25_000), '"'.repeat(50_000)]) {
+      await expect(runAnalysis(exec, launcher, location, { ...snapshot, patch: large })).rejects.toThrow(/96 KiB analysis request limit/);
     }
-    expect(calls).toEqual([]);
+    expect(calls).toHaveLength(2);
   });
 
-  test("accepts a bounded request as a complete review", async () => {
-    const { calls, fetch } = transport();
-    const patch = `${snapshot.patch}+${"x".repeat(88 * 1024)}\n`;
-    await expect(runAnalysis(fetch, config, { ...snapshot, patch })).resolves.toEqual(review);
-    const [[, options]] = calls;
-    expect(new TextEncoder().encode(options.body).byteLength).toBeLessThanOrEqual(96 * 1024);
-    expect(requestData(options).patch).toBe(patch);
+  test("uses only completed assistant text blocks and permits bounded stream overhead", async () => {
+    const text = json.padEnd(256 * 1024, " ");
+    const message = assistant(undefined, { content: [
+      { type: "thinking", thinking: "private thought" },
+      { type: "text", text: text.slice(0, 4) },
+      { type: "text", text: text.slice(4) },
+    ] });
+    const user = { role: "user", content: "not an analysis" };
+    const stdout = jsonl({ type: "session" }, messageEnd(user), { type: "agent_start" },
+      { type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "ignored" } },
+      messageEnd(message), { type: "turn_end", message, toolResults: [] }, agentEnd([user, message]),
+      { type: "advisor_cost_changed" }, { type: "advisor_yielded" }, { type: "notice", level: "info", message: "ignored" });
+    expect(stdout.length).toBeGreaterThan(256 * 1024);
+    await expect(runResult(success(stdout))).resolves.toEqual(review);
+    const tooLarge = assistant("🪴".repeat(65_537));
+    await expect(runResult(success(jsonl(messageEnd(tooLarge), agentEnd([tooLarge]))))).rejects.toThrow(/exceeded 256 KiB/);
+    await expect(runResult(success(`${stdout}${" ".repeat(4 * 1024 * 1024)}`))).rejects.toThrow(/stream exceeded 4 MiB/);
   });
 
-  test("rejects malformed and semantically invalid provider output", async () => {
-    for (const result of [
-      { ok: true, status: 200, text: async () => "not JSON" },
-      response({}), response({ choices: [] }), response({ choices: [completed().choices[0], completed().choices[0]] }),
-      response(completed(undefined, { finish_reason: undefined })), response(completed(undefined, { finish_reason: "tool_calls" })),
-      response(completed(undefined, { message: { role: "user", content: JSON.stringify(review) } })),
-      response(completed(undefined, { message: { content: JSON.stringify(review), tool_calls: [{ id: "not-allowed" }] } })),
-      response(completed("```json\n{}\n```")), response(completed(null)), response(completed(JSON.stringify({ ...review, groups: [] }))),
-      response(completed(JSON.stringify({ ...review, groups: [{ ...group, files: ["invented/path.js"] }] }))),
-      response({ error: { message: "unexpected provider diagnostic" }, ...completed() }),
+  test("rejects malformed, incomplete, unsupported, and semantically invalid output", async () => {
+    for (const stdout of [
+      "private malformed line", "", jsonl({ type: "result", result: json }),
+      jsonl(null), jsonl({}), jsonl(messageEnd()), jsonl(agentEnd()),
+      jsonl(messageEnd(), agentEnd(undefined, { willContinue: true })),
+      jsonl(messageEnd(), agentEnd(undefined, { isTerminal: false, yielded: false, awaitingAsyncWork: true })),
+      jsonl(messageEnd(), agentEnd([assistant(json, { stopReason: "error" })])),
+      jsonl(messageEnd(), agentEnd(undefined, { messages: null })),
+      jsonl(messageEnd(), messageEnd(), agentEnd()),
+      jsonl(messageEnd(), agentEnd(), { type: "unexpected-trailing-event" }),
+      jsonl(messageEnd(assistant(json, { stopReason: "aborted" })), agentEnd()),
+      jsonl(messageEnd(assistant(json, { stopReason: "error", errorMessage: "private diagnostics" })), agentEnd()),
+      jsonl(messageEnd(assistant(json, { role: "user" })), agentEnd()),
+      jsonl(messageEnd(assistant(json, { content: [{ type: "image", data: "private bytes" }] })), agentEnd()),
+      jsonl(messageEnd(assistant("```json\n{}\n```")), agentEnd()),
+      jsonl(messageEnd(assistant(JSON.stringify({ ...review, groups: [] }))), agentEnd()),
+      jsonl(messageEnd(assistant(JSON.stringify({ ...review, groups: [{ ...group, files: ["invented/path.js"] }] }))), agentEnd()),
     ]) {
-      await expect(runAnalysis(transport(result).fetch, config, snapshot)).rejects.toThrow(/invalid review/);
+      const error = await runResult(success(stdout)).catch((failure) => failure);
+      expect(error.message).toMatch(/invalid review/);
+      expect(error.message).not.toContain("private");
     }
   });
 
-  test("rejects truncated, refused, and oversized replies without exposing raw output", async () => {
-    const truncated = response(completed("private truncated JSON", { finish_reason: "length" }));
-    await expect(runAnalysis(transport(truncated).fetch, config, snapshot)).rejects.toThrow(/truncated the review/);
-    const refused = response(completed(undefined, { message: { refusal: "private refusal", content: null } }));
-    await expect(runAnalysis(transport(refused).fetch, config, snapshot)).rejects.toThrow(/declined the review/);
-    const large = response(completed(`private oversized body ${"🪴".repeat(66_000)}`));
-    await expect(runAnalysis(transport(large).fetch, config, snapshot)).rejects.toThrow(/exceeded 256 KiB/);
+  test("rejects tool events and tool content before returning a review", async () => {
+    const tool = assistant(json, { content: [{ type: "toolCall", id: "private tool ID" }] });
+    const prelude = [
+      { type: "tool_execution_start" },
+      { type: "message_update", assistantMessageEvent: { type: "toolcall_start" } },
+      { type: "message_update", message: tool },
+      messageEnd(tool),
+      { type: "turn_end", toolResults: [{ role: "toolResult" }] },
+    ];
+    for (const event of prelude) {
+      await expect(runResult(success(jsonl(event, messageEnd(), agentEnd())))).rejects.toThrow(/attempted to use tools/);
+    }
+    await expect(runResult(success(jsonl(messageEnd(), agentEnd([tool]))))).rejects.toThrow(/attempted to use tools/);
+    await expect(runResult(success(jsonl(messageEnd(), agentEnd(), prelude[0])))).rejects.toThrow(/attempted to use tools/);
   });
 
-  test("returns safe HTTP and transport errors without reading provider error bodies", async () => {
-    let read = false;
-    const text = async () => { read = true; return `provider error body containing ${apiKey}`; };
-    for (const [status, message] of [[401, /Check the API key/], [404, /endpoint or model/], [429, /service quota/], [503, /unavailable/]]) {
-      await expect(runAnalysis(transport({ ok: false, status, text }).fetch, config, snapshot)).rejects.toThrow(message);
+  test("reports execution and model failures without surfacing raw logs", async () => {
+    const truncated = assistant("private partial review", { stopReason: "length" });
+    for (const [result, expected] of [
+      [success(undefined, { code: 1, stderr: "private stderr" }), /Check the wrapper and OMP setup/],
+      [success(undefined, { timed_out: true }), /timed out after 120 seconds/],
+      [success(undefined, { truncated: true }), /Herdr truncated/],
+      [success(jsonl(messageEnd(truncated))), /OMP truncated the review/],
+      [success(jsonl({ type: "error", message: "private error" })), /Check the wrapper and OMP setup/],
+    ]) {
+      const error = await runResult(result).catch((failure) => failure);
+      expect(error.message).toMatch(expected);
+      expect(error.message).not.toContain("private");
     }
-    expect(read).toBe(false);
-    const fail = async () => { throw new Error(`internal transport details: ${apiKey}`); };
-    for (const fetch of [fail, transport({ ok: true, status: 200, text: fail }).fetch]) {
-      const error = await runAnalysis(fetch, config, snapshot).catch((failure) => failure);
-      expect(error.message).toContain("Check the service, endpoint, and Herdr network permissions");
-      expect(error.message).not.toContain(apiKey);
-      expect(error.message).not.toContain("internal transport details");
-    }
+    const fail = async () => { throw new Error("private transport diagnostic"); };
+    const error = await runAnalysis(fail, launcher, location, snapshot).catch((failure) => failure);
+    expect(error.message).toMatch(/Check the wrapper and OMP setup/);
+    expect(error.message).not.toContain("private");
   });
 });

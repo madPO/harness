@@ -1,16 +1,21 @@
 import { View } from "gpui-kit";
-import { appHome, checking, exec, focused, layout, panes, readTextFile, spaces } from "herdr";
+import { appHome, checking, exec, focused, knownAgents, layout, panes, setShared, shared, spaces, writeTextFile } from "herdr";
 import { resolveContext } from "./context.js";
 import { ReviewController } from "./controller.js";
+import { createCoreExecutor } from "./core-exec.js";
 import { demoReview } from "./demo.js";
 import { readBranches } from "./git.js";
-import { parseProviderConfig, providerKey, runAnalysis } from "./provider.js";
+import { launchKey, reviewLaunchers, runAnalysis } from "./provider.js";
 import { closeReviewView, renderReview, syncReviewView } from "./view.js";
 
 const POLL_MS = 10_000;
+const LAUNCHER_APPROVALS = "review-assistant.launcher-approvals";
 const location = () => reviewPanelActive() ? resolveContext(spaces(), panes(), focused()) : null;
 const sameLocation = (a, b) => a && b && a.space === b.space && a.cwd === b.cwd && a.on === b.on;
 const hasRef = (options, ref) => options?.some((branch) => branch.ref === ref);
+const launcherPlace = ({ on, cwd }) => JSON.stringify([on, cwd]);
+const approvedLauncher = (place) => shared(LAUNCHER_APPROVALS)?.[place] ?? null;
+const findLauncher = (options, key) => key && options?.find((option) => launchKey(option) === key);
 const idleReview = { status: "idle", message: null, result: null, expanded: new Set(), detail: null, canNavigate: false };
 
 function preselect(options, name) {
@@ -31,25 +36,28 @@ function branchFeedback(session) {
   return null;
 }
 
-async function prepareAnalysis() {
-  const path = `${appHome()}/review-assistant.json`;
-  let text;
-  try {
-    text = await readTextFile(path);
-  } catch {
-    throw new Error(`Couldn't read ${path}. Create the file or check its permissions, then press Compare.`);
-  }
-  if (text == null) {
-    throw new Error(`Create ${path} with an endpoint, model, and "consent": true. Then press Compare.`);
-  }
-  const config = parseProviderConfig(text);
-  const fetch = globalThis.fetch;
-  if (typeof fetch !== "function") {
-    throw new Error("Native fetch isn't available. Update Herdr, then press Compare.");
-  }
+function launcherFeedback(session, launcher) {
+  if (!session?.location.cwd) return "Select a workspace folder to find review launchers.";
+  if (session.launcherError) return session.launcherError;
+  if (session.launcherNotice) return session.launcherNotice;
+  if (!session.launcherOptions) return "Finding review launchers…";
+  if (!session.launcherOptions.length) return "Configure an OMP launcher in Herdr for this workspace machine.";
+  return launcher ? null : "Choose a launcher to enable Compare.";
+}
+
+function saveLauncher(place, identity) {
+  const approvals = { ...shared(LAUNCHER_APPROVALS) };
+  if (identity === null) delete approvals[place];
+  else approvals[place] = identity;
+  setShared(LAUNCHER_APPROVALS, approvals);
+}
+
+function newSession(location, previous) {
   return {
-    key: providerKey(config),
-    run: (snapshot, evidence) => runAnalysis(fetch, config, snapshot, evidence),
+    location, active: true, place: launcherPlace(location), target: previous?.target ?? null,
+    inventory: null, error: null, reading: false, preselect: previous?.preselect ?? true, nextProbe: 0,
+    comparing: null, compared: null, launcherOptions: null, launcherReading: false,
+    launcherError: null, launcherNotice: null,
   };
 }
 
@@ -78,7 +86,7 @@ export default class ReviewAssistant extends View {
       },
       location,
       changed: () => { this.needsSync = true; },
-      prepareAnalysis,
+      prepareAnalysis: () => this.prepareAnalysis(),
     });
     this.poll(cx);
     this.pollTimer = cx.timer.every(1000, (cx) => this.poll(cx));
@@ -96,15 +104,12 @@ export default class ReviewAssistant extends View {
     if (!live) {
       if (!previous?.active) return;
       // Invalidate in-flight inventory reads even when the same location returns.
-      this.branchSession = { ...previous, active: false, inventory: null, error: null, reading: false, comparing: false, nextProbe: 0 };
+      this.branchSession = { ...previous, active: false };
     } else if (!sameLocation(previous?.location, live)) {
-      this.branchSession = {
-        location: live, active: true, target: null, inventory: null, error: null,
-        reading: false, comparing: false, comparedRef: null, preselect: true, nextProbe: 0,
-      };
+      this.branchSession = newSession(live);
     } else {
       if (previous.active) return;
-      this.branchSession = { ...previous, active: true };
+      this.branchSession = newSession(live, previous);
     }
     this.needsSync = true;
   }
@@ -114,18 +119,32 @@ export default class ReviewAssistant extends View {
     const session = this.activeSession();
     const target = session?.inventory && session.target;
     const controllerModel = target ? this.controller.model() : null;
-    const review = target && target === session.comparedRef ? controllerModel : idleReview;
+    const approval = session ? approvedLauncher(session.place) : null;
+    const launcher = findLauncher(session?.launcherOptions, approval) || null;
+    const launcherBusy = Boolean(session?.launcherReading || session?.comparing);
+    const compared = session?.compared;
+    const review = target && compared?.ref === target && launcher && compared.identity === approval
+      ? controllerModel : idleReview;
     const branchMessage = branchFeedback(session);
     return {
       ...review,
       message: review.message ?? (review.status === "idle" && !branchMessage
-        ? target ? "Select Compare to review changes between these branches." : "Select a branch to compare."
+        ? target ? launcher ? "Select Compare to review changes between these branches." : null
+          : "Select a branch to compare."
         : null),
       branchOptions: session?.inventory?.branches,
       targetBranch: target,
       branchMessage,
       branchError: Boolean(session?.error),
-      canCompare: Boolean(target && session.inventory.current && !session.comparing && controllerModel.canRefresh),
+      launcherOptions: session?.launcherOptions ?? [],
+      selectedLauncher: launcher,
+      launcherApproved: Boolean(approval),
+      launcherMessage: launcherFeedback(session, launcher),
+      launcherError: Boolean(session?.launcherError || session?.launcherNotice),
+      launcherBusy,
+      launcherComparing: Boolean(session?.comparing),
+      launcherLocation: session?.location.cwd ? session.location : null,
+      canCompare: Boolean(target && session.inventory.current && launcher && !launcherBusy && controllerModel.canRefresh),
     };
   }
 
@@ -139,15 +158,17 @@ export default class ReviewAssistant extends View {
   poll(cx) {
     if (this.closed) return;
     this.syncLocation();
-    this.syncModel(cx);
     const session = this.activeSession();
     const now = Date.now();
-    if (!session?.location.cwd || now < session.nextProbe) return;
-    session.nextProbe = now + POLL_MS;
-    this.loadBranches(session, cx);
-    if (session.comparedRef && !session.comparing && this.controller.model().canRefresh) {
-      this.start(cx, (controller) => controller.probe());
+    if (session?.location.cwd && now >= session.nextProbe) {
+      session.nextProbe = now + POLL_MS;
+      this.loadBranches(session, cx);
+      if (!session.comparing) this.loadLaunchers(session, cx);
+      if (session.compared && !session.comparing && this.controller.model().canRefresh) {
+        this.start(cx, (controller) => controller.probe());
+      }
     }
+    this.syncModel(cx);
   }
 
   loadBranches(session, cx) {
@@ -181,6 +202,86 @@ export default class ReviewAssistant extends View {
       this.needsSync = true;
       this.syncModel(cx);
     });
+  }
+
+  async discoverLaunchers(session) {
+    if (this.activeSession() !== session) return;
+    let options;
+    try {
+      const programs = await knownAgents({ on: session.location.on });
+      if (!Array.isArray(programs)) throw new Error("Expected a launcher inventory.");
+      options = reviewLaunchers(programs);
+    } catch {
+      if (this.activeSession() !== session) return;
+      session.launcherOptions = null;
+      session.launcherError = "Couldn't find review launchers. Check the workspace connection.";
+      this.needsSync = true;
+      return;
+    }
+    if (this.activeSession() !== session) return;
+
+    const approval = approvedLauncher(session.place);
+    if (approval && !findLauncher(options, approval)) {
+      saveLauncher(session.place, null);
+      session.compared = null;
+      session.launcherNotice = "The approved launcher changed or disappeared. Choose a launcher again.";
+    }
+    session.launcherOptions = options;
+    session.launcherError = null;
+    this.needsSync = true;
+  }
+
+  loadLaunchers(session, cx) {
+    if (session.launcherReading) return;
+    session.launcherReading = true;
+    this.needsSync = true;
+    cx.spawn(async (cx) => {
+      try {
+        await this.discoverLaunchers(session);
+      } finally {
+        session.launcherReading = false;
+        this.needsSync = true;
+        this.syncLocation();
+        this.syncModel(cx);
+      }
+    });
+  }
+
+  async prepareAnalysis() {
+    const session = this.activeSession(), comparison = session?.comparing;
+    const requireCurrent = () => {
+      if (!comparison || this.activeSession() !== session || session.comparing !== comparison
+          || this.controller.context !== comparison.context || session.target !== comparison.ref) {
+        throw new Error("The comparison changed before launch. Select Compare again.");
+      }
+      if (session.launcherError) throw new Error(session.launcherError);
+      if (approvedLauncher(session.place) !== comparison.identity
+          || !findLauncher(session.launcherOptions, comparison.identity)) {
+        throw new Error("The approved launcher changed or disappeared. Choose a launcher again.");
+      }
+    };
+    requireCurrent();
+    await this.discoverLaunchers(session);
+    requireCurrent();
+    const coreExec = createCoreExecutor({
+      appHome,
+      exec: (command, args, options) => {
+        // Cleanup must still run if the workspace changes after staging.
+        if (command !== "bun" || args[1] !== "cleanup") requireCurrent();
+        return exec(command, args, options);
+      },
+      writeTextFile: (...args) => {
+        requireCurrent();
+        return writeTextFile(...args);
+      },
+    });
+    return {
+      key: comparison.identity,
+      run: (snapshot, evidence) => {
+        requireCurrent();
+        return runAnalysis(coreExec, comparison.launcher, session.location, snapshot, evidence);
+      },
+    };
   }
 
   start(cx, action, settled) {
@@ -241,16 +342,43 @@ export default class ReviewAssistant extends View {
     this.syncModel(cx);
   }
 
-  compare(cx) {
+  selectLauncher(identity, cx, renderedLocation = this.activeSession()?.location) {
     const session = this.activeSession();
-    if (!session || !this.model().canCompare) return;
-    const ref = session.target;
-    session.comparing = true;
+    if (!session || session.location !== renderedLocation || session.comparing || session.launcherReading
+        || !findLauncher(session.launcherOptions, identity)) return;
+    if (approvedLauncher(session.place) !== identity) {
+      saveLauncher(session.place, identity);
+      session.compared = null;
+    }
+    session.launcherNotice = null;
+    this.needsSync = true;
+    this.syncModel(cx);
+  }
+
+  clearLauncher(cx, renderedLocation = this.activeSession()?.location) {
+    const session = this.activeSession();
+    if (!session || session.location !== renderedLocation || session.comparing || !approvedLauncher(session.place)) return;
+    saveLauncher(session.place, null);
+    session.compared = null;
+    session.launcherNotice = null;
+    this.needsSync = true;
+    this.syncModel(cx);
+  }
+
+  compare(cx, identity, ref, renderedLocation = this.activeSession()?.location) {
+    const session = this.activeSession(), model = this.model();
+    if (!session || session.location !== renderedLocation || !model.canCompare || !identity
+        || session.target !== ref || launchKey(model.selectedLauncher) !== identity) return;
+    const comparison = { ref, identity, launcher: model.selectedLauncher };
+    session.comparing = comparison;
     this.start(cx, (controller) => {
-      session.comparedRef = ref;
-      return controller.compare(ref);
+      if (session.target !== ref || approvedLauncher(session.place) !== identity) return;
+      session.compared = comparison;
+      const pending = controller.compare(ref);
+      comparison.context = controller.context;
+      return pending;
     }, () => {
-      session.comparing = false;
+      session.comparing = null;
       this.needsSync = true;
     });
     this.needsSync = true;

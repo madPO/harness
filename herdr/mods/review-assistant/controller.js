@@ -183,7 +183,7 @@ export class ReviewController {
 
       request.snapshot = snapshot;
       if (!this.prepareAnalysis) {
-        throw new Error(`Configure an analysis provider in the Herdr app home, then select ${actionLabel(context.scope)}.`);
+        throw new Error(`Choose a review launcher, then select ${actionLabel(context.scope)}.`);
       }
       const { key, run } = await this.prepareAnalysis();
       if (!current() || this.error) return;

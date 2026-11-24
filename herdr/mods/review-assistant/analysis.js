@@ -9,7 +9,7 @@ const REVIEW_ACTION = /^(?:ensure|verify|confirm|check) +.*[\p{L}\p{N}]/iu;
 const UNSAFE_PROSE = /[\p{Cc}\p{Cs}\u2028\u2029]/u;
 
 function invalidReview() {
-  throw new Error("The analysis provider returned an invalid review. Try again or check the provider configuration.");
+  throw new Error("The review launcher returned an invalid review. Check the selected OMP launcher, then try again.");
 }
 
 function isRecord(value) {
