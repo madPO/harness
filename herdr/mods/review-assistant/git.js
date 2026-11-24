@@ -47,12 +47,12 @@ function overBudget(label) {
 // Callers select a read-only Git command and handle that command's exit codes.
 export async function gitRead(exec, context, args) {
   const cwd = context.root ?? context.cwd;
-  if (!cwd) throw new Error("Open a folder inside a Git working tree, then refresh Review Assistant.");
+  if (!cwd) throw new Error("Open a folder inside a Git working tree.");
   // check-ignore rejects literal pathspec magic; its caller supplies safe ./-prefixed paths.
   const options = args[0] === "check-ignore" ? READ.filter((option) => option !== "--literal-pathspecs") : READ;
   const result = await exec("git", [...options, ...args], { cwd, on: context.on ?? null, timeout: TIMEOUT });
   if (result.code !== 0 && result.stderr.includes("unknown option: --no-lazy-fetch")) {
-    throw new Error("Review Assistant requires Git 2.45 or newer. Upgrade Git on the selected machine, then refresh.");
+    throw new Error("Review Assistant requires Git 2.45 or newer. Upgrade Git on the selected machine.");
   }
   if (utf8Size(result.stdout) + utf8Size(result.stderr) >= HOST_OUTPUT_LIMIT) throw overBudget("Git output");
   return result;
@@ -60,27 +60,27 @@ export async function gitRead(exec, context, args) {
 
 function checked(result, limit, label, diff = false) {
   if (result.code !== 0 && !(diff && result.code === 1 && !result.stderr)) {
-    throw new Error(result.stderr.trim() || `Git exited with code ${result.code}. Refresh Review Assistant to try again.`);
+    throw new Error(result.stderr.trim() || `Git exited with code ${result.code}. Inspect the repository in a terminal.`);
   }
   if (utf8Size(result.stdout) >= limit) throw overBudget(label);
   return result.stdout;
 }
 
 function oneLine(text) {
-  if (!text.endsWith("\n")) throw new Error("Git returned incomplete repository information. Refresh Review Assistant.");
+  if (!text.endsWith("\n")) throw new Error("Git returned incomplete repository information. Inspect the repository in a terminal.");
   return text.slice(0, -1);
 }
 
 function objectId(text) {
   const id = oneLine(text);
-  if (!OID.test(id)) throw new Error("Git returned an invalid commit ID. Refresh Review Assistant.");
+  if (!OID.test(id)) throw new Error("Git returned an invalid commit ID. Inspect the repository in a terminal.");
   return id;
 }
 
 function records(text) {
   if (!text) return [];
   const entries = text.split("\0");
-  if (entries.pop() !== "") throw new Error("Git returned an incomplete file inventory. Refresh Review Assistant.");
+  if (entries.pop() !== "") throw new Error("Git returned an incomplete file inventory. Inspect the repository in a terminal.");
   return entries;
 }
 
@@ -108,7 +108,7 @@ function localPaths(text) {
   const dirty = new Set();
   // Renames are disabled for status, so both old and new names get their own record.
   for (const record of records(text)) {
-    if (!/^[ MADTUC?!]{2} /.test(record)) throw new Error("Git returned an unsupported local status. Refresh Review Assistant.");
+    if (!/^[ MADTUC?!]{2} /.test(record)) throw new Error("Git returned an unsupported local status. Inspect the repository in a terminal.");
     dirty.add(gitPath(record.slice(3)));
     if (dirty.size > MAX_DIRTY_PATHS) throw overBudget("Local file inventory");
   }
@@ -150,19 +150,48 @@ function boundedPreview(text) {
   return `${prefix}\n\nPreview limited to ${PREVIEW_LIMIT / 1024} Ki characters. Inspect the complete diff in a terminal.`;
 }
 
+const LOCAL_REF = "refs/heads/";
+const REMOTE_REF = "refs/remotes/";
+const localBranchRequired = () => new Error("Check out a local branch before pressing Compare.");
+
+async function readCurrentBranch(read) {
+  const result = await read(["symbolic-ref", "--quiet", "HEAD"]);
+  if (result.code === 1 && !result.stdout && !result.stderr) return null;
+  const ref = oneLine(checked(result, INVENTORY_LIMIT, "Git source branch"));
+  if (!ref.startsWith(LOCAL_REF) || ref.length === LOCAL_REF.length) throw localBranchRequired();
+  return ref;
+}
+
+const compareNames = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+
+function branchOptions(text) {
+  if (!text) return [];
+  if (!text.endsWith("\n")) throw new Error("Git returned an incomplete branch inventory.");
+  const branches = [];
+  for (const line of text.slice(0, -1).split("\n")) {
+    const [ref, symref, extra] = line.split("\0");
+    const prefix = ref.startsWith(LOCAL_REF) ? LOCAL_REF : ref.startsWith(REMOTE_REF) ? REMOTE_REF : null;
+    if (!prefix || ref.length === prefix.length || symref === undefined || extra !== undefined) {
+      throw new Error("Git returned an invalid branch record.");
+    }
+    if (!symref) branches.push({ ref, label: ref.slice(prefix.length) });
+  }
+  return branches.sort((a, b) => compareNames(a.label, b.label) || compareNames(a.ref, b.ref));
+}
+
 async function readHead(read) {
   const result = await read(["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"]);
   if (result.code !== 1 || result.stderr) return objectId(checked(result, INVENTORY_LIMIT, "Git HEAD"));
   const ref = oneLine(checked(await read(["symbolic-ref", "--quiet", "HEAD"]), INVENTORY_LIMIT, "Git HEAD"));
   const exists = await read(["show-ref", "--exists", ref]);
   if (exists.code === 2) return null;
-  throw new Error("Git could not resolve HEAD as a commit. Check the repository in a terminal, then refresh.");
+  throw new Error("Git could not resolve HEAD as a commit. Inspect the repository in a terminal.");
 }
 
 function refCandidates(target) {
-  if (target.startsWith("refs/heads/") || target.startsWith("refs/remotes/")) return [target];
+  if (target.startsWith(LOCAL_REF) || target.startsWith(REMOTE_REF)) return [target];
   if (target.startsWith("refs/")) return [];
-  return [`refs/heads/${target}`, `refs/remotes/${target}`];
+  return [`${LOCAL_REF}${target}`, `${REMOTE_REF}${target}`];
 }
 
 async function readTarget(read, target) {
@@ -176,9 +205,9 @@ async function readTarget(read, target) {
     const id = objectId(checked(await read(["show-ref", "--verify", "--hash", "--", ref]), INVENTORY_LIMIT, "Git branch lookup"));
     const commit = await read(["rev-parse", "--verify", "--end-of-options", `${id}^{commit}`]);
     if (objectId(checked(commit, INVENTORY_LIMIT, "Git branch commit")) === id) return { ref, id };
-    throw new Error("The selected branch does not point directly to a commit. Choose another branch and refresh.");
+    throw new Error("The selected branch does not point directly to a commit. Choose another branch and press Compare.");
   }
-  throw new Error("Choose an existing local or remote-tracking branch name, then refresh.");
+  throw new Error("Choose an existing local or remote-tracking branch, then press Compare.");
 }
 
 async function filterOverrides(read) {
@@ -214,7 +243,7 @@ async function untrackedPatch(read, paths) {
     const operand = path === "-" ? "./-" : path;
     const result = await read(["diff", "--no-index", ...DIFF, ...PATCH, "--no-renames", "--", "/dev/null", operand]);
     const patch = checked(result, UNTRACKED_PATCH_LIMIT, `Patch for untracked file ${JSON.stringify(path)}`, true);
-    if (!patch) throw new Error("An untracked file changed while reading. Refresh Review Assistant.");
+    if (!patch) throw new Error("An untracked file changed while reading. Try again.");
     size += utf8Size(patch);
     if (size >= PATCH_LIMIT) throw overBudget("Combined untracked patch");
     text += patch;
@@ -228,7 +257,7 @@ async function readWorktree(read, head) {
   const index = indexDiff(head);
   const staged = await names(read, index), unstaged = await names(read, []);
   if ([staged, unstaged].some((files) => files.some((file) => file.status === "U"))) {
-    throw new Error("Resolve merge conflicts before reviewing the working tree, or compare committed changes with a branch.");
+    throw new Error("Resolve merge conflicts or press Compare to review committed branch changes.");
   }
   const additions = await untrackedPaths(read);
   const inventory = inventoryOf(staged, unstaged, additions.map((path) => ({ path, status: "A" })));
@@ -245,7 +274,7 @@ const withCommitAttributes = (read, head) => (args) => read([`--attr-source=${he
 
 async function readBranch(read, readLocal, head, target) {
   const ancestor = await read(["merge-base", head, target.id]);
-  if (ancestor.code === 1 && !ancestor.stderr) throw new Error("The target branch has no merge base with HEAD. Choose another branch and refresh.");
+  if (ancestor.code === 1 && !ancestor.stderr) throw new Error("The target branch has no merge base with HEAD. Choose another branch and press Compare.");
   const base = objectId(checked(ancestor, INVENTORY_LIMIT, "Git merge base"));
   const revisions = [base, head];
   const readCommitted = withCommitAttributes(read, head);
@@ -259,38 +288,60 @@ function requestedScope(scope) {
   if (scope?.kind === "worktree") return { kind: "worktree" };
   if (scope?.kind === "branch" && typeof scope.target === "string" && scope.target.length > 0
     && scope.target.length <= 1024 && !scope.target.includes("\0")) return { kind: "branch", target: scope.target };
-  throw new Error("Choose Working tree or enter an existing branch name.");
+  throw new Error("Choose an existing local or remote-tracking branch, then press Compare.");
 }
 
-const headChanged = () => new Error("Git HEAD changed while reading. Refresh Review Assistant.");
+const headChanged = (comparing = false) => new Error(comparing
+  ? "Git HEAD changed while reading. Press Compare to try again."
+  : "Git HEAD changed while reading. Try again.");
 
-export async function readSnapshot(exec, location, requested) {
-  const scope = requestedScope(requested);
+async function readRepository(exec, location) {
   const top = await gitRead(exec, location, ["rev-parse", "--show-toplevel"]);
   if (top.code !== 0) {
     const detail = top.stderr.trim();
-    throw new Error(`Open a folder inside a Git working tree, then refresh Review Assistant.${detail ? `\n${detail}` : ""}`);
+    throw new Error(`Open a folder inside a Git working tree.${detail ? `\n${detail}` : ""}`);
   }
   const root = oneLine(checked(top, INVENTORY_LIMIT, "Git working tree path")), on = location.on ?? null;
-  if (!root || /[\0\uFFFD]/.test(root)) throw new Error("Git returned an unreadable working tree path. Open another repository and refresh.");
-  const read = (args) => gitRead(exec, { root, on }, args);
+  if (!root || /[\0\uFFFD]/.test(root)) throw new Error("Git returned an unreadable working tree path. Open another repository.");
+  return { root, on };
+}
+
+export async function readBranches(exec, location) {
+  const repository = await readRepository(exec, location);
+  const read = (args) => gitRead(exec, repository, args);
+  const current = await readCurrentBranch(read);
+  const refs = await read(["for-each-ref", "--format=%(refname)%00%(symref)", "refs/heads", "refs/remotes"]);
+  return { current, branches: branchOptions(checked(refs, INVENTORY_LIMIT, "Git branch inventory")) };
+}
+
+export async function readSnapshot(exec, location, requested) {
+  const scope = requestedScope(requested);
+  const repository = await readRepository(exec, location);
+  const { root, on } = repository;
+  const read = (args) => gitRead(exec, repository, args);
+  const comparing = scope.kind === "branch";
+  const sourceRef = comparing ? await readCurrentBranch(read) : null;
+  if (comparing && !sourceRef) throw localBranchRequired();
   const head = await readHead(read);
-  if (scope.kind === "branch" && !head) throw new Error("Create a commit before comparing branches, or review the working tree.");
-  const target = scope.kind === "branch" ? await readTarget(read, scope.target) : null;
+  if (comparing && !head) throw new Error("Create a commit on the checked-out branch before pressing Compare.");
+  const target = comparing ? await readTarget(read, scope.target) : null;
   const overrides = await filterOverrides(read);
   const readLocal = (args) => read([...overrides, ...args]);
   const { base = head, files, patch, dirtyPaths } = target
     ? await readBranch(read, readLocal, head, target)
     : await readWorktree(readLocal, head);
-  if (await readHead(read) !== head) throw headChanged();
   if (target) {
     const after = await readTarget(read, scope.target);
     if (after.ref !== target.ref || after.id !== target.id) {
-      throw new Error("The comparison branch changed while reading. Refresh Review Assistant.");
+      throw new Error("The comparison branch changed while reading. Press Compare to try again.");
     }
   }
+  if (await readHead(read) !== head) throw headChanged(comparing);
+  if (comparing && await readCurrentBranch(read) !== sourceRef) {
+    throw new Error("The checked-out branch changed while reading. Press Compare to try again.");
+  }
   // Keep an exact equality token without relying on host crypto or lossy patch summaries.
-  const revision = JSON.stringify([root, on, head, base, scope, target, files, patch, dirtyPaths]);
+  const revision = JSON.stringify([root, on, head, base, scope, sourceRef, target, files, patch, dirtyPaths]);
   return { root, on, head, base, scope, files, patch, dirtyPaths, revision };
 }
 
@@ -298,11 +349,11 @@ export async function readFileDiff(exec, snapshot, path) {
   if (!validPath(path)) throw new Error("Select a valid changed file to view its diff.");
   const file = snapshot.files.find((entry) => entry.path === path);
   if (!file || (file.oldPath !== undefined && !validPath(file.oldPath))) {
-    throw new Error("The file is not in this review snapshot. Refresh Review Assistant.");
+    throw new Error("The file is not in this review snapshot. Press Compare to update the file list.");
   }
   const { scope, head, base } = snapshot;
   if ((head !== null && !OID.test(head)) || (scope.kind === "branch" && (!OID.test(base) || !OID.test(head)))) {
-    throw new Error("The review snapshot has invalid commits. Refresh Review Assistant.");
+    throw new Error("The review snapshot has invalid commits. Press Compare to update the comparison.");
   }
   const read = (args) => gitRead(exec, snapshot, args);
   const paths = file.oldPath ? [file.oldPath, path] : [path];
@@ -321,6 +372,6 @@ export async function readFileDiff(exec, snapshot, path) {
     ]);
   }
   if (await readHead(read) !== head) throw headChanged();
-  if (!text) throw new Error("The selected diff is no longer available. Refresh Review Assistant.");
+  if (!text) throw new Error("The selected diff is no longer available. Press Compare to update the file list.");
   return { title: file.oldPath ? `${file.oldPath} → ${path}` : path, text: boundedPreview(text) };
 }

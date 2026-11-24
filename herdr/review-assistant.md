@@ -11,20 +11,17 @@ Review Assistant adds a tab to the T3 right panel. It groups Git changes by purp
 5. Select `herdr-t3` in Herdr's layout picker. Focus a terminal in the worktree you want to review.
 6. Click **Show panel** near the right end of the T3 tab bar. Select **Review Assistant** next to **Branches**.
 
-## Choose a review scope
+## Compare branches
 
-| Scope | What Review Assistant reads |
-| --- | --- |
-| **Working tree** (default) | Includes staged changes (HEAD to index), unstaged changes (index to working tree), and untracked files that Git does not ignore. |
-| **Compare with a branch** | Compares HEAD with its merge base with the target branch. The diff includes only committed changes. Influence also skips paths with local changes. |
+1. Open **Select branch** and choose a local or remote-tracking branch.
+2. Select **Compare** to review the current local branch against the selected branch. Check out a local branch first if HEAD is detached.
+3. Select **Compare** again whenever you want a new comparison, even if you have not changed the selection.
 
-Both scopes handle additions, deletions, and detected renames.
+Review Assistant compares the checked-out branch with the branches' merge base. The review includes committed additions, deletions, and detected renames. It excludes staged, unstaged, and untracked changes. Influence also skips paths with local changes.
 
-1. Click **Compare…**, enter a branch, then press Enter or click **Compare**. Use a local branch such as `main` or a remote-tracking branch such as `origin/main`.
-2. Use `refs/heads/main` or `refs/remotes/origin/main` to disambiguate. If a short name matches both, the local branch wins. Review Assistant reads refs already on the workspace machine and never fetches them. Update remote-tracking refs separately if you need a newer comparison.
-3. Check **Scope** before selecting **Refresh**. The scope identifies the comparison and worktree, plus the machine and base commit when available. Click **Use working tree** to leave branch comparison.
+The dropdown lists refs already on the workspace machine. Review Assistant never fetches; update remote-tracking refs separately if needed.
 
-To start on a target branch, edit the `review-assistant` block in your installed T3 layout. Add `targetBranch` under `content.props`:
+To preselect a target, add `targetBranch` under `content.props` in your layout's `review-assistant` block:
 
 ```json
 {
@@ -37,7 +34,7 @@ To start on a target branch, edit the `review-assistant` block in your installed
 }
 ```
 
-The branch input changes the current scope without editing the layout file. If Git reports unmerged paths, resolve them before reviewing the working tree. Alternatively, compare committed changes with a branch.
+Use a fully qualified ref to distinguish identical branch names. For short names, local branches take precedence. Preselecting a branch does not start a comparison.
 
 ## Configure analysis and consent
 
@@ -54,22 +51,22 @@ Create `~/.config/herdr-app/review-assistant.json` on the desktop machine. If yo
 
 Use an OpenAI-compatible Chat Completions endpoint and a model that supports JSON mode. Omit `apiKey` if the endpoint does not require a bearer token. Use a full HTTPS URL without credentials, a query, or a fragment. Plain HTTP is allowed only for loopback addresses on the desktop machine. Restrict access to the file and keep the key and configuration out of the repository.
 
-Set `"consent": true` only if you authorize sending repository content to that provider. Review Assistant makes no provider request without valid configuration and an explicit **Refresh** or **Retry analysis**. Opening the tab, changing scope, and automatic Git checks do not contact the provider.
+Set `"consent": true` only if you authorize sending repository content to that provider. Provider requests require valid configuration and a **Compare** press. Opening the tab, selecting a branch, and automatic Git checks do not contact the provider.
 
 - **Data sent:** Herdr Desktop sends plain text diffs, changed paths, and bounded excerpts from related unchanged source. Git reads run on the selected workspace machine, including over SSH. The provider request still originates from the desktop.
 - **Request limit:** The serialized JSON request body is limited to 96 KiB. Binary patch payloads are omitted. Oversized requests are rejected before sending; review a smaller scope or inspect the diff locally.
 - **Trust boundaries:** Treat diffs and excerpts as sensitive. Review what your provider may log or retain before enabling analysis. Keeping the API key out of Git does not remove secrets already present in source or diffs. Herdr mods are trusted code, not sandboxed extensions.
 - **Provider capabilities:** Review Assistant sends evidence, not tools or shell access. It validates returned file references against the evidence and does not execute model instructions. It does not edit the repository, approve changes, or submit review comments.
 
-## Read and refresh a review
+## Read and rerun a review
 
-1. Select **Refresh**. If analysis fails, address the message and select **Retry analysis**. An empty scope does not need provider analysis.
+1. If analysis fails, address the message and select **Compare** again. A comparison with no changes does not need provider analysis.
 2. Read **Logical Changes** by purpose. Treat importance as suggested review priority. Use **Key to review** to decide what to check against the code.
 3. Expand **Changed files (N)** and select a file to open its read-only diff inside the panel. Changed file lists start collapsed in normal use.
 4. Read **Influence** for possible effects on unchanged code. Select a source reference to open a read-only excerpt around that line. Use **Close preview** to dismiss either preview. Use Git in the workspace terminal if you need a complete diff or source file.
-5. Select **Refresh** after editing files or changing the Git comparison. If the panel says **Review is out of date**, treat its suggestions as historical. Preview navigation is disabled until the review is current again.
+5. Select **Compare** again after the branches change. If the panel says the review is out of date, treat the suggestions as historical. Preview navigation stays disabled until the review is current again.
 
-Review Assistant checks Git periodically while its tab is visible. The session-local cache lives in memory, not on disk. Refresh can reuse results for the same worktree, scope, exact Git revision, provider endpoint, and model. Refresh preserves matching expanded groups where possible. Closing the mod or quitting Herdr clears its in-memory review state. Hiding the panel does not unload the mod.
+Review Assistant checks Git periodically while its tab is visible. Each **Compare** press reads Git again. If the comparison has changes, Review Assistant requests fresh analysis. Review Assistant preserves matching expanded groups where possible. Closing the mod or quitting Herdr clears its in-memory review state.
 
 AI suggestions can miss risks or misunderstand code. Influence references point to unchanged code, but the suggested effects are not confirmed. An empty Influence list does not establish that nothing else is affected. Verify the important claims yourself before accepting changes.
 

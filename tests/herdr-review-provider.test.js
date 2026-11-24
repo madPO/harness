@@ -159,7 +159,7 @@ describe("Review Assistant mocked Chat Completions transport", () => {
   test("fails oversized requests before calling transport, including escaped and multibyte input", async () => {
     const { calls, fetch } = transport();
     for (const patch of ["x".repeat(96 * 1024), "🪴".repeat(25_000), '"'.repeat(25_000)]) {
-      await expect(runAnalysis(fetch, config, { ...snapshot, patch })).rejects.toThrow(/96 KiB.*smaller scope/);
+      await expect(runAnalysis(fetch, config, { ...snapshot, patch })).rejects.toThrow(/96 KiB analysis request limit/);
     }
     expect(calls).toEqual([]);
   });

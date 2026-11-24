@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitRead, readFileDiff, readSnapshot, validPath } from "../herdr/mods/review-assistant/git.js";
+import { gitRead, readBranches, readFileDiff, readSnapshot, validPath } from "../herdr/mods/review-assistant/git.js";
 
 const worktree = { kind: "worktree" };
 const branch = (target) => ({ kind: "branch", target });
@@ -114,6 +114,51 @@ describe("Review Assistant Git snapshots", () => {
     expect(readFileSync(join(root, literal), "utf8")).toBe("literal untracked addition\n");
   });
 
+  test("lists distinct local and remote branch refs while excluding symbolic refs and tags", async () => {
+    const root = repo();
+    write(root, "base.txt", "base\n");
+    const base = commit(root, "Base");
+    git(root, "branch", "origin/main");
+    git(root, "branch", "z-local");
+    git(root, "tag", "only-a-tag");
+    write(root, "topic.txt", "source change\n");
+    const head = commit(root, "Source change");
+    git(root, "update-ref", "refs/remotes/origin/main", head);
+    git(root, "update-ref", "refs/remotes/other/HEAD", base);
+    git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+
+    expect(await readBranches(exec, location(root))).toEqual({
+      current: "refs/heads/main",
+      branches: [
+        { ref: "refs/heads/main", label: "main" },
+        { ref: "refs/heads/origin/main", label: "origin/main" },
+        { ref: "refs/remotes/origin/main", label: "origin/main" },
+        { ref: "refs/remotes/other/HEAD", label: "other/HEAD" },
+        { ref: "refs/heads/z-local", label: "z-local" },
+      ],
+    });
+    const local = await readSnapshot(exec, location(root), branch("refs/heads/origin/main"));
+    const remote = await readSnapshot(exec, location(root), branch("refs/remotes/origin/main"));
+    expect(local).toMatchObject({ base, head, files: [{ path: "topic.txt", status: "A" }] });
+    expect(remote).toMatchObject({ base: head, head, files: [] });
+  });
+
+  test("rejects detached branch comparisons without blocking worktree review", async () => {
+    const root = repo();
+    write(root, "base.txt", "base\n");
+    const head = commit(root, "Base");
+    git(root, "switch", "--detach", "HEAD");
+    write(root, "base.txt", "detached worktree edit\n");
+    expect(await readBranches(exec, location(root))).toEqual({
+      current: null,
+      branches: [{ ref: "refs/heads/main", label: "main" }],
+    });
+    await expect(readSnapshot(exec, location(root), branch("refs/heads/main"))).rejects.toThrow(/Check out a local branch.*Compare/);
+    const snapshot = await readSnapshot(exec, location(root), worktree);
+    expect(snapshot).toMatchObject({ head, files: [{ path: "base.txt", status: "M" }] });
+    expect(snapshot.patch).toContain("+detached worktree edit");
+  });
+
   test("compares the merge base to HEAD and records local changes only as dirty paths", async () => {
     const root = repo();
     write(root, "before.txt", "renamed content\n");
@@ -180,6 +225,13 @@ describe("Review Assistant Git snapshots", () => {
     expect((await gitRead(routed, snapshot, ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
     expect(started[0].cwd).toBe(nested);
     expect(started.slice(1).every(({ cwd }) => cwd === linked)).toBe(true);
+    const branchReadStart = started.length;
+    expect(await readBranches(routed, location(nested, "backend-wsl"))).toEqual({
+      current: "refs/heads/linked",
+      branches: [{ ref: "refs/heads/linked", label: "linked" }, { ref: "refs/heads/main", label: "main" }],
+    });
+    expect(started[branchReadStart].cwd).toBe(nested);
+    expect(started.slice(branchReadStart + 1).every(({ cwd }) => cwd === linked)).toBe(true);
     for (const { program, on, timeout, args } of started) {
       expect(program).toBe("git");
       expect(on).toBe("backend-wsl");
@@ -198,6 +250,7 @@ describe("Review Assistant Git snapshots", () => {
 
   test("opens unborn worktrees and reports non-repositories and unavailable branch scopes", async () => {
     const root = repo();
+    expect(await readBranches(exec, location(root))).toEqual({ current: "refs/heads/main", branches: [] });
     write(root, "first.txt", "staged first file\n");
     git(root, "add", "first.txt");
     write(root, "first.txt", "then edited\n");
@@ -290,6 +343,21 @@ describe("Review Assistant Git snapshots", () => {
       return response;
     };
     await expect(readSnapshot(movingExec, location(root), worktree)).rejects.toThrow("Git HEAD changed");
+  });
+
+  test("rejects a source branch switch at the same commit during comparison", async () => {
+    const root = repo();
+    write(root, "base.txt", "base\n");
+    const head = commit(root, "Base");
+    git(root, "branch", "same-commit");
+    const switchingExec = async (program, args, options) => {
+      const response = await exec(program, args, options);
+      if (args.includes("status")) git(root, "switch", "same-commit");
+      return response;
+    };
+    await expect(readSnapshot(switchingExec, location(root), branch("refs/heads/main")))
+      .rejects.toThrow(/checked-out branch changed.*Compare/);
+    expect(git(root, "rev-parse", "HEAD").trim()).toBe(head);
   });
 
   test("accepts literal Git names and rejects traversal or unrepresentable paths", () => {

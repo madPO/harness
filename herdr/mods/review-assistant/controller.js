@@ -7,17 +7,7 @@ const sameLocation = (a, b) => a.space === b.space && a.cwd === b.cwd && a.on ==
 const sameScope = (a, b) => a.kind === b.kind && a.target === b.target;
 const copyScope = (scope) => scope.kind === "branch" ? { kind: "branch", target: scope.target } : worktree;
 const errorText = (error) => String(error?.message ?? error);
-const changedDuringAnalysis = "Changes updated during analysis. Select Refresh to analyze the current changes.";
-
-function scopeLabel(context, snapshot) {
-  if (!context) return "Not selected";
-  const { location, scope } = context;
-  const scopeName = scope.kind === "branch" ? `Compare with ${scope.target}` : "Working tree";
-  const path = snapshot?.root ?? location.cwd;
-  const identity = path && (location.on ? `${location.on}:${path}` : path);
-  const base = snapshot?.base ? `base ${snapshot.base.slice(0, 7)}` : null;
-  return [scopeName, base, identity].filter(Boolean).join(" · ");
-}
+const actionLabel = (scope) => scope.kind === "branch" ? "Compare" : "Refresh";
 
 function findReference(influence, reference) {
   if (!reference || typeof reference !== "object") return;
@@ -45,20 +35,20 @@ function reviewModel(state) {
     message = stale;
   } else if (snapshot && !snapshot.files.length) {
     status = "empty";
-    message = "No changes to review in this scope.";
+    message = context.scope.kind === "branch"
+      ? "No committed changes to review in this comparison."
+      : "No changes to review in the working tree.";
   } else if (review && review.revision === snapshot?.revision) {
     status = "ready";
     message = preview?.error;
-  } else message = "Select Refresh to analyze changes in this scope.";
+  } else message = `Select ${actionLabel(context.scope)} to analyze changes.`;
 
   return {
-    scopeLabel: scopeLabel(context, snapshot), status, message,
+    status, message,
     result: status === "ready" || status === "stale" ? review?.result ?? null : null,
     expanded: expanded ?? new Set(), detail: status === "ready" ? preview?.detail ?? null : null,
     canRefresh: hasLocation && !loading,
     canNavigate: status === "ready",
-    canCompare: hasLocation,
-    canUseWorktree: hasLocation && context.scope.kind === "branch",
   };
 }
 
@@ -139,13 +129,25 @@ export class ReviewController {
     return this.#requestSnapshot(this.context);
   }
 
+  compare(target) {
+    const previousRead = this.read;
+    this.setScope({ kind: "branch", target });
+    return this.#refresh(true, previousRead);
+  }
+
   refresh() {
+    return this.#refresh(false);
+  }
+
+  #refresh(force, previousRead) {
     this.sync();
     const context = this.context;
     if (!context.location.cwd || !this.#isCurrent(context)) return Promise.resolve();
     if (this.analysis) return this.analysis.promise;
 
-    const request = { snapshot: null, message: "Reading Git changes…" };
+    // A Compare press needs a snapshot read that started after the press.
+    if (force && this.read === previousRead) this.read = null;
+    const request = { force, snapshot: null, message: "Reading Git changes…" };
     request.promise = Promise.resolve().then(() => this.#analyze(context, request));
     this.analysis = request;
     this.analysisError = null;
@@ -181,7 +183,7 @@ export class ReviewController {
 
       request.snapshot = snapshot;
       if (!this.prepareAnalysis) {
-        throw new Error("Configure an analysis provider in the Herdr app home, then retry analysis.");
+        throw new Error(`Configure an analysis provider in the Herdr app home, then select ${actionLabel(context.scope)}.`);
       }
       const { key, run } = await this.prepareAnalysis();
       if (!current() || this.error) return;
@@ -191,7 +193,7 @@ export class ReviewController {
         this.preview = null;
       }
       // The exact Git revision also includes the worktree, machine, and comparison scope.
-      let results = this.#cache.get(snapshot.revision);
+      let results = request.force ? undefined : this.#cache.get(snapshot.revision);
       const cached = results?.get(key);
       let result = cached, failure;
       if (!cached) {
@@ -221,7 +223,7 @@ export class ReviewController {
         for (const { id } of result.groups) if (this.expanded.has(id)) expanded.add(id);
         this.expanded = expanded;
       }
-      if (!cached) {
+      if (!request.force && !cached) {
         if (!results) this.#cache.set(snapshot.revision, results = new Map());
         results.set(key, result);
       }
@@ -265,9 +267,9 @@ export class ReviewController {
         this.stale = null;
       } else if (this.analysis?.snapshot) {
         this.analysis = null;
-        this.stale = changedDuringAnalysis;
+        this.stale = `Changes updated during analysis. Select ${actionLabel(context.scope)} to analyze the current changes.`;
       } else if (this.review && snapshot.revision !== this.review.revision) {
-        this.stale ??= "Changes updated in this scope. Select Refresh to analyze them.";
+        this.stale ??= `Changes updated. Select ${actionLabel(context.scope)} to analyze them.`;
       }
     }
     this.error = error;
@@ -317,7 +319,7 @@ export class ReviewController {
     if (!current()) return;
 
     this.preview = detail ? { detail } : {
-      error: `Couldn't open the ${label}: ${failure}. Select Refresh to try again.`,
+      error: `Couldn't open the ${label}: ${failure}. Select ${actionLabel(context.scope)} to try again.`,
     };
     this.changed();
   }

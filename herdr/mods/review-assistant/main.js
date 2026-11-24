@@ -1,15 +1,35 @@
-import { View, div } from "gpui-kit";
-import { Button, InputState, Input, h_flex } from "gpui-base";
-import { appHome, checking, exec, focused, layout, panes, readTextFile, spaces, theme } from "herdr";
+import { View } from "gpui-kit";
+import { appHome, checking, exec, focused, layout, panes, readTextFile, spaces } from "herdr";
 import { resolveContext } from "./context.js";
 import { ReviewController } from "./controller.js";
 import { demoReview } from "./demo.js";
+import { readBranches } from "./git.js";
 import { parseProviderConfig, providerKey, runAnalysis } from "./provider.js";
 import { closeReviewView, renderReview, syncReviewView } from "./view.js";
 
-const WORKTREE = { kind: "worktree" };
 const POLL_MS = 10_000;
 const location = () => reviewPanelActive() ? resolveContext(spaces(), panes(), focused()) : null;
+const sameLocation = (a, b) => a && b && a.space === b.space && a.cwd === b.cwd && a.on === b.on;
+const hasRef = (options, ref) => options?.some((branch) => branch.ref === ref);
+const idleReview = { status: "idle", message: null, result: null, expanded: new Set(), detail: null, canNavigate: false };
+
+function preselect(options, name) {
+  if (!name) return null;
+  if (name.startsWith("refs/")) return hasRef(options, name) ? name : null;
+  const local = `refs/heads/${name}`;
+  if (hasRef(options, local)) return local;
+  const remote = `refs/remotes/${name}`;
+  return hasRef(options, remote) ? remote : null;
+}
+
+function branchFeedback(session) {
+  if (!session?.location.cwd) return "Open a folder inside a Git working tree to compare branches.";
+  if (session.error) return session.error;
+  if (!session.inventory) return "Reading Git branches…";
+  if (!session.inventory.current) return "Check out a local branch before comparing branches.";
+  if (!session.inventory.branches.length) return "There are no local or remote-tracking branches to compare.";
+  return null;
+}
 
 async function prepareAnalysis() {
   const path = `${appHome()}/review-assistant.json`;
@@ -17,15 +37,15 @@ async function prepareAnalysis() {
   try {
     text = await readTextFile(path);
   } catch {
-    throw new Error(`Couldn't read ${path}. Create the file or check its permissions, then retry analysis.`);
+    throw new Error(`Couldn't read ${path}. Create the file or check its permissions, then press Compare.`);
   }
   if (text == null) {
-    throw new Error(`Create ${path} with an endpoint, model, and "consent": true. Then retry analysis.`);
+    throw new Error(`Create ${path} with an endpoint, model, and "consent": true. Then press Compare.`);
   }
   const config = parseProviderConfig(text);
   const fetch = globalThis.fetch;
   if (typeof fetch !== "function") {
-    throw new Error("Native fetch isn't available. Update Herdr, then retry analysis.");
+    throw new Error("Native fetch isn't available. Update Herdr, then press Compare.");
   }
   return {
     key: providerKey(config),
@@ -45,17 +65,12 @@ export default class ReviewAssistant extends View {
   init(props, cx) {
     this.demo = props?.demo === true;
     if (this.demo || checking()) {
-      this.staticModel = this.demo ? demoReview() : {
-        scopeLabel: "Not selected", status: "idle", message: null, result: null,
-        expanded: new Set(), detail: null, canRefresh: false, canNavigate: false,
-        canCompare: false, canUseWorktree: false,
-      };
+      this.staticModel = this.demo ? demoReview() : idleReview;
       syncReviewView(this, this.staticModel, cx);
       return;
     }
 
-    this.targetBranch = typeof props?.targetBranch === "string" ? props.targetBranch.trim() : "";
-    this.nextProbe = 0;
+    this.initialTarget = typeof props?.targetBranch === "string" ? props.targetBranch.trim() : "";
     this.controller = new ReviewController({
       exec: (command, args, options) => {
         if (this.closed) throw new Error("Review Assistant is closed.");
@@ -64,70 +79,134 @@ export default class ReviewAssistant extends View {
       location,
       changed: () => { this.needsSync = true; },
       prepareAnalysis,
-      scope: this.targetBranch ? { kind: "branch", target: this.targetBranch } : WORKTREE,
     });
-    syncReviewView(this, this.controller.model(), cx);
     this.poll(cx);
     this.pollTimer = cx.timer.every(1000, (cx) => this.poll(cx));
+  }
+
+  activeSession() {
+    const session = this.branchSession;
+    return !this.closed && session?.active && sameLocation(session.location, location()) ? session : null;
+  }
+
+  syncLocation() {
+    if (this.closed) return;
+    this.controller.sync();
+    const live = location(), previous = this.branchSession;
+    if (!live) {
+      if (!previous?.active) return;
+      // Invalidate in-flight inventory reads even when the same location returns.
+      this.branchSession = { ...previous, active: false, inventory: null, error: null, reading: false, comparing: false, nextProbe: 0 };
+    } else if (!sameLocation(previous?.location, live)) {
+      this.branchSession = {
+        location: live, active: true, target: null, inventory: null, error: null,
+        reading: false, comparing: false, comparedRef: null, preselect: true, nextProbe: 0,
+      };
+    } else {
+      if (previous.active) return;
+      this.branchSession = { ...previous, active: true };
+    }
+    this.needsSync = true;
+  }
+
+  model() {
+    if (this.staticModel) return this.staticModel;
+    const session = this.activeSession();
+    const target = session?.inventory && session.target;
+    const controllerModel = target ? this.controller.model() : null;
+    const review = target && target === session.comparedRef ? controllerModel : idleReview;
+    const branchMessage = branchFeedback(session);
+    return {
+      ...review,
+      message: review.message ?? (review.status === "idle" && !branchMessage
+        ? target ? "Select Compare to review changes between these branches." : "Select a branch to compare."
+        : null),
+      branchOptions: session?.inventory?.branches,
+      targetBranch: target,
+      branchMessage,
+      branchError: Boolean(session?.error),
+      canCompare: Boolean(target && session.inventory.current && !session.comparing && controllerModel.canRefresh),
+    };
   }
 
   syncModel(cx) {
     if (this.closed || !this.needsSync) return;
     this.needsSync = false;
-    const model = this.controller?.model() ?? this.staticModel;
-    if (this.branchInput && (!model.canCompare || this.branchContext !== this.controller?.context)) {
-      this.dismissScopeInput();
-    }
-    syncReviewView(this, model, cx);
+    syncReviewView(this, this.model(), cx);
     cx.notify();
   }
 
   poll(cx) {
     if (this.closed) return;
-    const moved = this.controller.sync();
+    this.syncLocation();
     this.syncModel(cx);
-    if (!reviewPanelActive()) {
-      this.nextProbe = 0;
-      return;
-    }
+    const session = this.activeSession();
     const now = Date.now();
-    const { context } = this.controller;
-    if (moved || this.probeContext !== context || now >= this.nextProbe) {
-      this.probeContext = context;
-      this.nextProbe = now + POLL_MS;
-      this.start(cx, () => this.controller.probe());
+    if (!session?.location.cwd || now < session.nextProbe) return;
+    session.nextProbe = now + POLL_MS;
+    this.loadBranches(session, cx);
+    if (session.comparedRef && !session.comparing && this.controller.model().canRefresh) {
+      this.start(cx, (controller) => controller.probe());
     }
   }
 
-  start(cx, action) {
-    const { controller } = this;
-    if (this.closed || !controller || !reviewPanelActive()) return;
-    const { context } = controller;
+  loadBranches(session, cx) {
+    if (session.reading) return;
+    session.reading = true;
     cx.spawn(async (cx) => {
-      if (this.closed || this.controller !== controller) return;
-      if (controller.sync() || controller.context !== context || !reviewPanelActive()) {
-        this.nextProbe = 0;
+      if (this.activeSession() !== session) {
+        this.syncLocation();
         this.syncModel(cx);
         return;
       }
-      // Render loading and completion with the task's own native context.
+      let inventory, error = null;
       try {
-        const pending = action();
+        inventory = await readBranches(this.controller.exec, session.location);
+      } catch (cause) {
+        error = String(cause?.message ?? cause) || "Couldn't read Git branches. Check the selected folder.";
+      }
+      if (this.activeSession() !== session) {
+        this.syncLocation();
+        this.syncModel(cx);
+        return;
+      }
+      session.reading = false;
+      session.error = error;
+      session.inventory = inventory;
+      if (inventory) {
+        if (session.preselect) session.target = preselect(inventory.branches, this.initialTarget);
+        else if (!hasRef(inventory.branches, session.target)) session.target = null;
+        session.preselect = false;
+      }
+      this.needsSync = true;
+      this.syncModel(cx);
+    });
+  }
+
+  start(cx, action, settled) {
+    const { controller } = this, session = this.activeSession();
+    if (!session) return;
+    const { context } = controller;
+    cx.spawn(async (cx) => {
+      try {
+        this.syncLocation();
+        if (this.activeSession() !== session || controller.context !== context) return;
+        // Render loading and completion with the task's own native context.
+        const pending = action(controller);
         this.syncModel(cx);
         await pending;
       } finally {
+        settled?.();
+        this.syncLocation();
         this.syncModel(cx);
       }
     });
   }
 
-  refresh(cx) {
-    if (this.controller?.model().canRefresh) this.start(cx, () => this.controller.refresh());
-  }
-
   toggle(id, cx) {
-    if (this.controller) this.controller.toggle(id);
-    else if (this.demo) {
+    if (this.controller) {
+      if (this.model().result) this.controller.toggle(id);
+    } else if (this.demo) {
       const expanded = new Set(this.staticModel.expanded);
       if (expanded.has(id)) expanded.delete(id);
       else expanded.add(id);
@@ -137,17 +216,15 @@ export default class ReviewAssistant extends View {
     this.syncModel(cx);
   }
 
-  openFile(path, cx) {
-    const result = this.controller?.model().result;
-    if (!result) return;
-    this.start(cx, () => {
-      if (this.controller.model().result === result) return this.controller.openFile(path);
+  openFile(path, cx, result) {
+    this.start(cx, (controller) => {
+      if (this.model().result === result) return controller.openFile(path);
     });
   }
 
   openReference(reference, cx, result) {
-    this.start(cx, () => {
-      if (this.controller.model().result === result) return this.controller.openReference(reference);
+    this.start(cx, (controller) => {
+      if (this.model().result === result) return controller.openReference(reference);
     });
   }
 
@@ -156,78 +233,28 @@ export default class ReviewAssistant extends View {
     this.syncModel(cx);
   }
 
-  compare(cx) {
-    if (!this.controller?.model().canCompare) return;
-    if (!this.dismissScopeInput()) {
-      const input = InputState.new({ value: this.targetBranch, placeholder: "Enter a target branch" });
-      this.branchInput = input;
-      this.branchContext = this.controller.context;
-      this.submitFocus = cx.focus_handle();
-      const focus = (value, cx) => {
-        if (this.branchInput !== input) return;
-        this.branchFocused = value;
-        cx.notify();
-      };
-      input.on("focus", (_e, cx) => focus(true, cx));
-      input.on("blur", (_e, cx) => focus(false, cx));
-      input.on("change", (_e, cx) => { if (this.branchInput === input) cx.notify(); });
-      input.on("submit", (_e, cx) => { if (this.branchInput === input) this.submitScope(cx); });
-      input.focus();
-    }
-    cx.notify();
-  }
-
-  dismissScopeInput() {
-    if (!this.branchInput) return false;
-    const { branchInput: input, submitFocus } = this;
-    this.branchInput = null;
-    this.branchContext = null;
-    this.submitFocus = null;
-    this.branchFocused = false;
-    input.release();
-    submitFocus.release();
-    return true;
-  }
-
-  submitScope(cx) {
-    if (!this.controller?.model().canCompare || this.branchContext !== this.controller.context) return;
-    const target = this.branchInput?.value().trim();
-    if (!target) return;
-    this.targetBranch = target;
-    this.changeScope({ kind: "branch", target }, cx);
-  }
-
-  useWorktree(cx) {
-    if (this.controller?.model().canUseWorktree) this.changeScope(WORKTREE, cx);
-  }
-
-  changeScope(scope, cx) {
-    if (this.dismissScopeInput()) this.needsSync = true;
-    this.controller.setScope(scope);
+  selectBranch(ref, cx) {
+    const session = this.activeSession();
+    if (!hasRef(session?.inventory?.branches, ref)) return;
+    session.target = ref;
+    this.needsSync = true;
     this.syncModel(cx);
-    this.nextProbe = 0;
-    this.poll(cx);
   }
 
-  scopeInput() {
-    const t = theme();
-    const disabled = !this.branchInput.value().trim();
-    return h_flex().min_w(0).items_center().gap(4).on_key_down((e, cx) => {
-      if (e.key !== "escape") return;
-      cx.stop_propagation();
-      if (this.dismissScopeInput()) cx.notify();
-    })
-      .child(Input.new(this.branchInput).flex_1().min_w(0).h(28).px(6).rounded(5).border(2).bg(t.input)
-        .text_color(t.foreground).border_color(this.branchFocused ? t.accent : t.border)
-        .tab_index(0).accessibility_label("Target branch"))
-      .child(Button.new("review-submit-scope").relative().h(28).px(8).rounded(5).bg(t.raised)
-        .text_color(t.foreground).font_medium().disabled(disabled)
-        .when(disabled, (el) => el.opacity(0.5))
-        .when(!disabled, (el) => el.track_focus(this.submitFocus).tab_index(0).cursor_pointer()
-          .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
-        .on_click((_e, cx) => this.submitScope(cx)).child("Compare")
-        .when(!disabled && this.submitFocus.is_focused(), (el) => el
-          .child(div().absolute().inset_0().rounded(5).border(2).border_color(t.accent))));
+  compare(cx) {
+    const session = this.activeSession();
+    if (!session || !this.model().canCompare) return;
+    const ref = session.target;
+    session.comparing = true;
+    this.start(cx, (controller) => {
+      session.comparedRef = ref;
+      return controller.compare(ref);
+    }, () => {
+      session.comparing = false;
+      this.needsSync = true;
+    });
+    this.needsSync = true;
+    this.syncModel(cx);
   }
 
   close() {
@@ -236,13 +263,10 @@ export default class ReviewAssistant extends View {
     this.pollTimer?.cancel();
     this.pollTimer = null;
     this.controller?.close();
-    this.dismissScopeInput();
     closeReviewView(this);
   }
 
   render() {
-    const model = this.controller?.model() ?? this.staticModel;
-    return renderReview(this, this.branchInput && model.canCompare && this.branchContext === this.controller?.context
-      ? { ...model, scopeInput: this.scopeInput() } : model);
+    return renderReview(this, this.model());
   }
 }

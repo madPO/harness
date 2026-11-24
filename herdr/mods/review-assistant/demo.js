@@ -59,15 +59,11 @@ const result = {
 
 export function demoReview() {
   return {
-    scopeLabel: "Demo fixture · Working tree",
     status: "ready",
     message: null,
     result,
     expanded: new Set([result.groups[0].id]),
     detail: null,
-    canRefresh: false,
     canNavigate: false,
-    canCompare: false,
-    canUseWorktree: false,
   };
 }

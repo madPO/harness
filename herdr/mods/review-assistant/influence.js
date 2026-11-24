@@ -179,7 +179,7 @@ function locations(output, head, terms, excluded) {
 
 async function treeBlobs(read, head, paths) {
   const result = await read(["ls-tree", "--full-tree", "-l", "-z", head, "--", ...paths]);
-  if (result.code !== 0) throw new Error("Could not read the review commit. Refresh Review Assistant or inspect Git in a terminal.");
+  if (result.code !== 0) throw new Error("Could not read the review commit. Try again or inspect Git in a terminal.");
   const requested = new Set(paths), blobs = new Map();
   for (const record of result.stdout.split("\0")) {
     const tab = record.indexOf("\t");
@@ -197,7 +197,7 @@ async function ignoredPaths(read, paths) {
   const ignored = new Set();
   for (const [index, result] of results.entries()) {
     if ((result.code !== 0 && result.code !== 1) || result.stdout || result.stderr) {
-      throw new Error("Could not check ignored source paths. Refresh Review Assistant or inspect Git in a terminal.");
+      throw new Error("Could not check ignored source paths. Try again or inspect Git in a terminal.");
     }
     if (result.code === 0) ignored.add(paths[index]);
   }
@@ -207,7 +207,7 @@ async function ignoredPaths(read, paths) {
 
 async function sourceLines(read, blob) {
   const result = await read(["cat-file", "blob", blob.oid]);
-  if (result.code !== 0) throw new Error("Could not read the committed source. Refresh Review Assistant or inspect Git in a terminal.");
+  if (result.code !== 0) throw new Error("Could not read the committed source. Try again or inspect Git in a terminal.");
   if (result.stdout.length > MAX_BLOB_SIZE || /[\0\uFFFD]/.test(result.stdout)) return null;
   const lines = result.stdout.split("\n");
   if (lines.at(-1) === "") lines.pop();
@@ -243,7 +243,7 @@ function excerpt(lines, line, symbol, radius, width) {
 export async function readInfluenceEvidence(exec, snapshot) {
   const { head } = snapshot;
   if (head === null) return [];
-  if (!OID.test(head)) throw new Error("The review snapshot has an invalid commit. Refresh Review Assistant.");
+  if (!OID.test(head)) throw new Error("The review snapshot has an invalid commit. Try again.");
   const { terms, modules } = searchPlan(snapshot);
   if (!terms.size) return [];
   const read = (args) => gitRead(exec, snapshot, args);
@@ -253,7 +253,7 @@ export async function readInfluenceEvidence(exec, snapshot) {
     ...[...terms.keys()].flatMap((term) => ["-e", term]), head, "--",
   ]);
   if (grep.code === 1 && !grep.stdout && !grep.stderr) return [];
-  if (grep.code !== 0) throw new Error("Could not search unchanged source. Refresh Review Assistant or inspect Git in a terminal.");
+  if (grep.code !== 0) throw new Error("Could not search unchanged source. Try again or inspect Git in a terminal.");
   const byPath = new Map();
   for (const hit of locations(grep.stdout, head, terms, excludedPaths(snapshot))) {
     if (byPath.has(hit.path)) byPath.get(hit.path).push(hit);
@@ -297,19 +297,19 @@ export async function readInfluenceSource(exec, snapshot, reference) {
   const { head } = snapshot;
   if (!OID.test(head) || !unchangedPath(path, excludedPaths(snapshot)) || !Number.isSafeInteger(line) || line < 1
     || typeof symbol !== "string" || !(IDENTIFIER.test(symbol) || SPECIFIER.test(symbol) || KEY.test(symbol) || API_PATH.test(symbol))) {
-    throw new Error("Select a valid unchanged source reference or refresh Review Assistant.");
+    throw new Error("Select a valid unchanged source reference.");
   }
   const read = (args) => gitRead(exec, snapshot, args);
   if ((await ignoredPaths(read, [path])).has(path)) {
-    throw new Error("The source file is ignored. Select another source reference or refresh Review Assistant.");
+    throw new Error("The source file is ignored. Select another source reference.");
   }
   const blob = (await treeBlobs(read, head, [path])).get(path);
-  if (!blob) throw new Error("The source file is not available in the review commit. Refresh Review Assistant.");
+  if (!blob) throw new Error("The source file is not available in the review commit.");
   if (blob.size > MAX_BLOB_SIZE) throw new Error("The source file exceeds the preview limit. Inspect the committed file in a terminal.");
   const source = await sourceLines(read, blob);
   if (!source) throw new Error("This committed file is not a supported text preview. Inspect it in a terminal.");
   if (!matchesLocation(source.code, { path, line, symbol }, changedModules(snapshot.files))) {
-    throw new Error("The source reference no longer matches the review commit. Refresh Review Assistant.");
+    throw new Error("The source reference no longer matches the review commit.");
   }
   return { title: path, text: excerpt(source.lines, line, symbol, 6, 240), line };
 }

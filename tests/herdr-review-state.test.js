@@ -10,7 +10,7 @@ import { demoReview } from "../herdr/mods/review-assistant/demo.js";
 const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
 const directories = [];
 const worktree = { kind: "worktree" };
-const branch = { kind: "branch", target: "main" };
+const branch = { kind: "branch", target: "refs/heads/main" };
 const location = (cwd, on = null, space = "review") => ({ space, cwd, on });
 const policyPath = "quota.js";
 const callerPath = "read-quota.js";
@@ -237,6 +237,56 @@ describe("Review Assistant state", () => {
     expectTitle(controller, "test/model-b");
   });
 
+  test("runs the provider on every Compare press even when the comparison has not changed", async () => {
+    const { root, base, head } = topic();
+    const { controller, run } = state(location(root), { scope: branch });
+    await controller.probe();
+    expect(controller.model().message).toMatch(/select Compare/i);
+    expect(run).not.toHaveBeenCalled();
+
+    await controller.compare(branch.target);
+    await controller.compare(branch.target);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    const [[first], [second]] = run.mock.calls;
+    expect(second).toMatchObject({ base, head, scope: branch, revision: first.revision });
+    expectTitle(controller, "Quota review");
+  });
+
+  test("reads the new checkout on Compare even when an older probe is pending", async () => {
+    const { root, base, head } = topic();
+    const gate = pause();
+    let sourceReadCountdown = 0;
+    const { controller, run } = state(location(root), {
+      async exec(program, args, options) {
+        const result = await exec(program, args, options);
+        if (sourceReadCountdown && args.includes("symbolic-ref") && --sourceReadCountdown === 0) await gate.wait();
+        return result;
+      },
+    });
+    await controller.compare(branch.target);
+    const context = controller.context;
+
+    let pending, nextHead;
+    sourceReadCountdown = 2; // Hold the probe's final source ref until after the checkout.
+    await gate.whilePending(controller.probe(), () => {
+      expect(controller.model().canRefresh).toBe(true);
+      git(root, "switch", "-c", "next-topic");
+      nextHead = commit(root, "Reduce quota again");
+      pending = controller.compare(branch.target);
+      expect(controller.compare(branch.target)).toBe(pending);
+    });
+    await pending;
+
+    expect(controller.context).toBe(context);
+    expect(run).toHaveBeenCalledTimes(2);
+    const [[first], [second]] = run.mock.calls;
+    expect(first.head).toBe(head);
+    expect(second).toMatchObject({ base, head: nextHead, scope: branch });
+    expect(second.patch).toContain(`+${change(2).trimEnd()}`);
+    expectTitle(controller, "Quota review");
+  });
+
   test("marks same-path edits stale and preserves only matching disclosures after refresh", async () => {
     const { root } = repo();
     editPolicy(root, 1);
@@ -305,7 +355,7 @@ describe("Review Assistant state", () => {
     await controller.probe();
     expectNoReview(controller, "idle");
     expect([...controller.model().expanded]).toEqual([]);
-    expect(controller.model().scopeLabel).toContain(`review-ssh:${root}`);
+    expect(controller.context).toEqual({ location: location(root, "review-ssh"), scope: worktree });
     await controller.refresh();
     expectTitle(controller, "review-ssh");
 
@@ -313,7 +363,7 @@ describe("Review Assistant state", () => {
     await controller.probe();
     expectNoReview(controller, "idle");
     expect([...controller.model().expanded]).toEqual([]);
-    expect(controller.model().scopeLabel).toContain(`review-ssh:${linked}`);
+    expect(controller.context).toEqual({ location: location(linked, "review-ssh", "linked-review"), scope: worktree });
     await controller.refresh();
     expect(run).toHaveBeenCalledTimes(3);
     const snapshots = run.mock.calls.map(([snapshot]) => snapshot);
@@ -405,8 +455,7 @@ describe("Review Assistant navigation", () => {
     const read = mock(exec);
     const { controller, run } = state(location(root, "review-ssh"), { scope: branch, exec: read });
     await controller.refresh();
-    expect(run.mock.calls[0][0]).toMatchObject({ base, head, scope: branch });
-    expect(controller.model().scopeLabel).toContain("Compare with main");
+    expect(run.mock.calls[0][0]).toMatchObject({ root, on: "review-ssh", base, head, scope: branch });
 
     read.mockClear();
     await controller.openFile("local-only.txt");
@@ -450,7 +499,9 @@ describe("Review Assistant navigation", () => {
 
     write(root, callerPath, "// The caller is no longer unchanged.\n");
     await controller.openReference(canonical);
-    expect(controller.model()).toMatchObject({ status: "stale", detail: null, canNavigate: false });
+    expect(controller.model()).toMatchObject({
+      status: "stale", detail: null, canNavigate: false, message: expect.stringMatching(/select Compare/i),
+    });
 
     read.mockClear();
     await controller.openReference(canonical);
