@@ -272,12 +272,10 @@ describe("Review Assistant OMP worker", () => {
       jsonl(null), jsonl({}), jsonl(messageEnd()), jsonl(agentEnd()),
       jsonl(messageEnd(), agentEnd(undefined, { willContinue: true })),
       jsonl(messageEnd(), agentEnd(undefined, { isTerminal: false, yielded: false, awaitingAsyncWork: true })),
-      jsonl(messageEnd(), agentEnd([assistant(json, { stopReason: "error" })])),
       jsonl(messageEnd(), agentEnd(undefined, { messages: null })),
       jsonl(messageEnd(), messageEnd(), agentEnd()),
       jsonl(messageEnd(), agentEnd(), { type: "unexpected-trailing-event" }),
       jsonl(messageEnd(assistant(json, { stopReason: "aborted" })), agentEnd()),
-      jsonl(messageEnd(assistant(json, { stopReason: "error", errorMessage: "private diagnostics" })), agentEnd()),
       jsonl(messageEnd(assistant(json, { role: "user" })), agentEnd()),
       jsonl(messageEnd(assistant(json, { content: [{ type: "image", data: "private bytes" }] })), agentEnd()),
       jsonl(messageEnd(assistant("```json\n{}\n```")), agentEnd()),
@@ -306,22 +304,31 @@ describe("Review Assistant OMP worker", () => {
     await expect(runResult(success(jsonl(messageEnd(), agentEnd(), prelude[0])))).rejects.toThrow(/attempted to use tools/);
   });
 
-  test("reports execution and model failures without surfacing raw logs", async () => {
+  test("reports full diagnostics without exposing ordinary output or thinking", async () => {
     const truncated = assistant("private partial review", { stopReason: "length" });
-    for (const [result, expected] of [
-      [success(undefined, { code: 1, stderr: "private stderr" }), /Check the command and its dependencies/],
-      [success(undefined, { timed_out: true }), /timed out after 120 seconds/],
-      [success(undefined, { truncated: true }), /Herdr truncated/],
-      [success(jsonl(messageEnd(truncated))), /OMP truncated the review/],
-      [success(jsonl({ type: "error", message: "private error" })), /Check the command and its dependencies/],
+    const diagnostic = "échec 🪴\ntrace line";
+    const failed = assistant("private model text", { stopReason: "error", errorMessage: diagnostic,
+      content: [{ type: "thinking", thinking: "private thought" }, { type: "text", text: "private model text" }] });
+    for (const [result, expected, detail] of [
+      [success(undefined, { code: 1, stderr: diagnostic }), /Check the command and its dependencies/, diagnostic],
+      [success(undefined, { timed_out: true, truncated: true, stderr: diagnostic }), /timed out after 120 seconds/, diagnostic],
+      [success(undefined, { truncated: true }), /Herdr truncated/, "Herdr truncated"],
+      [success(jsonl(messageEnd(truncated))), /OMP truncated the review/, "OMP truncated"],
+      [success(jsonl({ type: "error", message: diagnostic })), /Check the command and its dependencies/, diagnostic],
+      [success(jsonl(messageEnd(failed), agentEnd([failed]))), /Check the command and its dependencies/, diagnostic],
+      [success(jsonl(messageEnd(), agentEnd([assistant(json, { stopReason: "error" })]))), /Check the command and its dependencies/, "stopped with an error"],
     ]) {
       const error = await runResult(result).catch((failure) => failure);
       expect(error.message).toMatch(expected);
-      expect(error.message).not.toContain("private");
+      expect(error.message).toContain(detail);
+      expect(error.message).not.toContain("private model text");
+      expect(error.message).not.toContain("private thought");
+      expect(error.message).not.toContain(snapshot.patch);
+      if (result.timed_out && result.truncated) expect(error.message).toContain("Herdr truncated");
     }
-    const fail = async () => { throw new Error("private transport diagnostic"); };
+    const fail = async () => { throw new Error(diagnostic); };
     const error = await runAnalysis(fail, launcher, location, snapshot).catch((failure) => failure);
     expect(error.message).toMatch(/Check the command and its dependencies/);
-    expect(error.message).not.toContain("private");
+    expect(error.message).toContain(diagnostic);
   });
 });

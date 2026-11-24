@@ -63,6 +63,7 @@ Review Assistant no longer uses `programs.json` to discover launchers. Move any 
 - **Desktop transport:** The bridge stages evidence briefly in the desktop app home. Keep that directory private, including any `HERDR_APP_HOME` override. On Windows, use a directory inside your private user profile. The bridge removes the staged evidence during normal operation.
 - **Worker access:** The worker flags disable OMP tools, extensions, and session persistence. Your action must forward those flags. Operating-system sandboxing depends on the command you choose.
 - **Provider retention:** Diffs can contain secrets. Check what the configured OMP provider logs or retains before comparing.
+- **Failure diagnostics:** The panel may show worker stderr and provider or transport errors. Diagnostics can contain sensitive data. Review them before sharing screenshots or logs. Transport limits can truncate output, and the panel reports truncation.
 
 ## Read and rerun a review
 

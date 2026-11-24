@@ -29,7 +29,7 @@ function readResult(result) {
   if (result?.code === 2) throw new Error("Herdr Core did not reply in time. Check the selected workspace connection.");
   if (result?.code !== 0 || typeof result.stdout !== "string") throw new Error(BRIDGE_FAILURE);
 
-  // Keep stdout out of the JSON header to avoid expanding it past the native exec output limit.
+  // Keep both streams out of the JSON header to avoid JSON escaping overhead.
   const newline = result.stdout.indexOf("\n");
   if (newline < 0 || newline > 256) throw new Error(BRIDGE_FAILURE);
   let header;
@@ -38,12 +38,15 @@ function readResult(result) {
   } catch {
     throw new Error(BRIDGE_FAILURE);
   }
-  const { code, length, timed_out, truncated } = header ?? {};
+  const { code, length, stderrLength, timed_out, truncated } = header ?? {};
   if (!(code === null || Number.isInteger(code)) || typeof timed_out !== "boolean"
-    || typeof truncated !== "boolean" || length !== result.stdout.length - newline - 1) {
+    || typeof truncated !== "boolean" || !Number.isSafeInteger(length) || length < 0
+    || !Number.isSafeInteger(stderrLength) || stderrLength < 0
+    || length + stderrLength !== result.stdout.length - newline - 1) {
     throw new Error(BRIDGE_FAILURE);
   }
-  return { code, timed_out, truncated, stdout: result.stdout.slice(newline + 1) };
+  return { code, timed_out, truncated, stdout: result.stdout.slice(newline + 1, newline + 1 + length),
+    stderr: result.stdout.slice(newline + 1 + length) };
 }
 
 export function createCoreExecutor({ exec, writeTextFile, appHome }) {
@@ -59,8 +62,8 @@ export function createCoreExecutor({ exec, writeTextFile, appHome }) {
     const run = async (args, limit, failure) => {
       try {
         return await exec("bun", [script, ...args], { on: null, timeout: limit });
-      } catch {
-        throw new Error(failure);
+      } catch (error) {
+        throw new Error(`${failure}${error?.message ? `\n\n${error.message}` : ""}`);
       }
     };
     const stage = await run(["stage"], STAGE_TIMEOUT, STAGE_FAILURE);

@@ -164,6 +164,34 @@ function rejectToolUse(message) {
   }
 }
 
+function failureDiagnostics(stream) {
+  if (typeof stream !== "string" || !fitsUtf8(stream, STREAM_LIMIT)) return [];
+  const details = new Set();
+  const assistantError = (message) => {
+    if (message?.role === "assistant" && message.stopReason === "error") {
+      details.add(typeof message.errorMessage === "string" && message.errorMessage
+        ? `OMP assistant error:\n${message.errorMessage}` : "OMP assistant stopped with an error.");
+    }
+  };
+  for (const line of stream.split("\n")) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type === "error") {
+      const detail = typeof event.message === "string" ? event.message
+        : typeof event.error === "string" ? event.error : event.error?.message;
+      details.add(typeof detail === "string" && detail ? `OMP error:\n${detail}` : "OMP reported an error.");
+    }
+    assistantError(event?.message);
+    assistantError(event?.assistantMessageEvent?.partial);
+    if (Array.isArray(event?.messages)) event.messages.forEach(assistantError);
+  }
+  return [...details];
+}
+
+function withDiagnostics(message, details) {
+  return new Error([message, ...details.filter(Boolean)].join("\n\n"));
+}
+
 function decodeAnalysis(stream) {
   if (typeof stream !== "string") throw new Error(INVALID_RESPONSE);
   if (!fitsUtf8(stream, STREAM_LIMIT)) {
@@ -231,15 +259,24 @@ export async function runAnalysis(coreExec, launcher, { on, cwd }, snapshot, evi
   let result;
   try {
     result = await coreExec({ argv: launcher.argv, on, cwd, input, timeout: 120 });
-  } catch {
-    throw new Error(LAUNCH_FAILURE);
+  } catch (error) {
+    throw withDiagnostics(LAUNCH_FAILURE, [error?.message]);
   }
+  const details = failureDiagnostics(result?.stdout);
+  if (typeof result?.stderr === "string" && result.stderr) details.push(`Worker stderr:\n${result.stderr}`);
   if (result?.timed_out === true) {
-    throw new Error("The review launcher timed out after 120 seconds. Review fewer changes or choose another launcher.");
+    const truncation = result.truncated === true ? "Herdr truncated the review launcher output." : "";
+    throw withDiagnostics("The review launcher timed out after 120 seconds. Review fewer changes or choose another launcher.", [truncation, ...details]);
   }
   if (result?.truncated === true) {
-    throw new Error("Herdr truncated the review launcher output. Review fewer changes or choose another launcher.");
+    throw withDiagnostics("Herdr truncated the review launcher output. Review fewer changes or choose another launcher.", details);
   }
-  if (result?.code !== 0) throw new Error(LAUNCH_FAILURE);
-  return validateAnalysis(decodeAnalysis(result.stdout), snapshot.files, evidence);
+  if (result?.code !== 0 || details.some((detail) => detail.startsWith("OMP "))) {
+    throw withDiagnostics(LAUNCH_FAILURE, details);
+  }
+  try {
+    return validateAnalysis(decodeAnalysis(result.stdout), snapshot.files, evidence);
+  } catch (error) {
+    throw withDiagnostics(error?.message || INVALID_RESPONSE, details);
+  }
 }

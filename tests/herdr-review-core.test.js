@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCoreExecutor } from "../herdr/mods/review-assistant/core-exec.js";
 
@@ -9,9 +9,9 @@ const TOKEN = `review-assistant-stage-${"d".repeat(32)}-AbCd12`;
 const EVIDENCE = "sensitive fixture evidence 🪴\n";
 const argv = ["sandbox wrapper", "--", "", "$HOME; touch example", "a\"b\\c"];
 const request = { argv, on: "work-linux", cwd: "/repos/a project", input: EVIDENCE, timeout: 120 };
-const framed = ({ code = 0, timed_out = false, truncated = false, stdout = "" } = {}) => ({
+const framed = ({ code = 0, timed_out = false, truncated = false, stdout = "", stderr = "" } = {}) => ({
   code: 0,
-  stdout: `${JSON.stringify({ code, timed_out, truncated, length: stdout.length })}\n${stdout}`,
+  stdout: `${JSON.stringify({ code, timed_out, truncated, length: stdout.length, stderrLength: stderr.length })}\n${stdout}${stderr}`,
   stderr: EVIDENCE,
 });
 
@@ -40,7 +40,7 @@ describe("Review Assistant Desktop Core executor", () => {
     const root = home.slice(0, -1);
     const script = `${root}\\mods\\review-assistant\\core-bridge.js`;
     const { coreExec, calls, writes } = adapter({ home, submit: () => framed({ stdout: "résultat 🛠\n" }) });
-    expect(await coreExec(request)).toEqual({ code: 0, timed_out: false, truncated: false, stdout: "résultat 🛠\n" });
+    expect(await coreExec(request)).toEqual({ code: 0, timed_out: false, truncated: false, stdout: "résultat 🛠\n", stderr: "" });
     expect(calls).toEqual([
       { command: "bun", args: [script, "stage"], options: { on: null, timeout: 10_000 } },
       { command: "bun", args: [script, "submit", TOKEN], options: { on: null, timeout: 135_000 } },
@@ -63,15 +63,23 @@ describe("Review Assistant Desktop Core executor", () => {
     expect(JSON.parse(writes[0][1]).on).toBeNull();
   });
 
-  test("returns only the worker stdout and status, including timeouts, truncation, and nonzero exits", async () => {
+  test("returns both worker streams and status, including timeouts, truncation, and nonzero exits", async () => {
     for (const result of [
-      { code: null, timed_out: true, truncated: false, stdout: "partial" },
-      { code: 0, timed_out: false, truncated: true, stdout: "partial" },
-      { code: 4, timed_out: false, truncated: false, stdout: "" },
+      { code: null, timed_out: true, truncated: false, stdout: "partial", stderr: "échec 🪴\nline two\n" },
+      { code: 0, timed_out: false, truncated: true, stdout: "partial", stderr: "" },
+      { code: 4, timed_out: false, truncated: false, stdout: "", stderr: "failed" },
     ]) {
       const { coreExec } = adapter({ submit: () => framed(result) });
       expect(await coreExec(request)).toEqual(result);
     }
+  });
+
+  test("includes execution exception diagnostics without changing cleanup", async () => {
+    const diagnostic = "transport échec 🪴\nconnection closed";
+    const { coreExec, calls } = adapter({ submit: () => { throw new Error(diagnostic); } });
+    const error = await coreExec(request).catch((failure) => failure);
+    expect(error.message).toContain(diagnostic);
+    expect(calls.map(({ args }) => args[1])).toEqual(["stage", "submit", "cleanup"]);
   });
 
   test("cleans up after a failed write, rejected dispatch, or malformed result without retrying", async () => {
@@ -105,7 +113,7 @@ function installBridge() {
   mkdirSync(mod, { recursive: true });
   const script = join(mod, "core-bridge.js");
   copyFileSync(fileURLToPath(new URL("../herdr/mods/review-assistant/core-bridge.js", import.meta.url)), script);
-  const run = (...args) => Bun.spawnSync([process.execPath, script, ...args], { stderr: "pipe", stdout: "pipe" });
+  const run = (...args) => Bun.spawnSync([process.execPath, script, ...args], { stderr: "pipe", stdout: "pipe", env: { ...process.env, PATH: `${root}${delimiter}${process.env.PATH}` } });
   return { root, run };
 }
 
@@ -116,6 +124,27 @@ function stage(run) {
 }
 
 describe("Review Assistant private staging helper", () => {
+  test("frames Unicode worker stdout and stderr without losing multiline diagnostics", () => {
+    if (process.platform === "win32") return;
+    const { root, run } = installBridge();
+    const stdout = "output 🪴\nsecond line\n";
+    const stderr = "échec 🔥\ntrace line\n";
+    const reply = JSON.stringify({ jsonrpc: "2.0", id: 1, result: {
+      code: 1, timed_out: false, truncated: false,
+      stdout: Buffer.from(stdout).toString("base64"), stderr: Buffer.from(stderr).toString("base64"),
+    } });
+    const hc = join(root, "hc");
+    writeFileSync(hc, `#!/bin/sh\nprintf '%s\\n' '${reply}'\n`);
+    chmodSync(hc, 0o700);
+    const token = stage(run);
+    writeFileSync(join(root, token, "request.json"), JSON.stringify(request));
+    const result = run("submit", token);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe(framed({ code: 1, stdout, stderr }).stdout);
+    expect(result.stderr.toString()).toBe("");
+    expect(existsSync(join(root, token))).toBe(false);
+  });
+
   test("issues unique private directories and removes malformed staged evidence before failing", () => {
     const { root, run } = installBridge();
     const first = stage(run), second = stage(run);

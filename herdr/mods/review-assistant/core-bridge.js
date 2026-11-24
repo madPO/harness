@@ -155,22 +155,31 @@ async function connect(params) {
 function decodeReply(bytes) {
   const response = JSON.parse(UTF8.decode(bytes));
   if (response?.jsonrpc !== "2.0" || response.id !== 1 || Object.hasOwn(response, "error")) throw new Error();
-  const { code, stdout: encoded, timed_out, truncated } = response.result ?? {};
+  const { code, stdout: encoded, stderr: encodedError, timed_out } = response.result ?? {};
+  let { truncated } = response.result ?? {};
   if (!(code === null || Number.isInteger(code)) || typeof timed_out !== "boolean"
-    || typeof truncated !== "boolean" || typeof encoded !== "string" || encoded.length % 4 !== 0
-    || !/^[A-Za-z0-9+/]*={0,2}(?![\s\S])/.test(encoded)) throw new Error();
-  const size = encoded.length / 4 * 3 - (encoded.endsWith("==") ? 2 : Number(encoded.endsWith("=")));
-  if (size > CORE_STDOUT_LIMIT) throw new Error();
-  if (size > STDOUT_LIMIT) return { code, timed_out, truncated: true, stdout: "" };
-  let stdout;
-  try {
-    stdout = UTF8.decode(Buffer.from(encoded, "base64"));
-  } catch (error) {
-    // An incomplete stream can end inside a UTF-8 character. Keep the worker's status without the partial stdout.
-    if (!timed_out && !truncated && code === 0) throw error;
+    || typeof truncated !== "boolean") throw new Error();
+  const decode = (value, limit) => {
+    if (typeof value !== "string" || value.length % 4 !== 0
+      || !/^[A-Za-z0-9+/]*={0,2}(?![\s\S])/.test(value)) throw new Error();
+    const size = value.length / 4 * 3 - (value.endsWith("==") ? 2 : Number(value.endsWith("=")));
+    if (size > limit) throw new Error();
+    const data = Buffer.from(value, "base64");
+    try {
+      return UTF8.decode(data);
+    } catch (error) {
+      if (!timed_out && !truncated && code === 0) throw error;
+      truncated = true;
+      return new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+    }
+  };
+  let stdout = decode(encoded, CORE_STDOUT_LIMIT);
+  const stderr = decode(encodedError, CORE_STDERR_LIMIT);
+  if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > STDOUT_LIMIT - 4096) {
     stdout = "";
+    truncated = true;
   }
-  return { code, timed_out, truncated, stdout };
+  return { code, timed_out, truncated, stdout, stderr };
 }
 
 try {
@@ -184,9 +193,9 @@ try {
       if (stage) removeStage(stage);
     } else {
       if (!stage) throw new Error();
-      const { code, timed_out, truncated, stdout } = decodeReply(await connect(takeRequest(stage)));
-      process.stdout.write(`${JSON.stringify({ code, timed_out, truncated, length: stdout.length })}\n`);
-      process.stdout.write(stdout);
+      const { code, timed_out, truncated, stdout, stderr } = decodeReply(await connect(takeRequest(stage)));
+      process.stdout.write(`${JSON.stringify({ code, timed_out, truncated, length: stdout.length, stderrLength: stderr.length })}\n`);
+      process.stdout.write(stdout + stderr);
     }
   } else {
     throw new Error();
